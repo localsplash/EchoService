@@ -1,0 +1,16 @@
+{
+  "name": "echoservice",
+  "version": "1.0.0",
+  "description": "Echo mid-tier API for frontend data interactions",
+  "main": "src/server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "helmet": "^7.1.0",
+    "morgan": "^1.10.0"
+  }
+}

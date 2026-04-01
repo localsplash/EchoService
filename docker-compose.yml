@@ -1,0 +1,10 @@
+services:
+  echo-service:
+    build: .
+    container_name: echo-service
+    restart: unless-stopped
+    environment:
+      - PORT=8080
+      - CORS_ORIGINS=*
+    ports:
+      - "127.0.0.1:18080:8080"
