@@ -3,6 +3,18 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const mysql = require('mysql2/promise');
+const multer = require('multer');
+const { v4: uuidv4 } = require('uuid');
+const fs = require('fs');
+const path = require('path');
+const { uploadMedia } = require('./bandwidth-media');
+const { obtainPendingMedia, detectMimeType, buildStoragePaths, relativeStoragePath, generateThumbnail, MEDIA_ROOT } = require('./mediaObtain');
+
+// Multer: store uploads in temp dir, max 3.5 MB per file, max 10 files
+const upload = multer({
+  dest: path.join(MEDIA_ROOT, '_tmp'),
+  limits: { fileSize: 3.5 * 1024 * 1024, files: 10 }
+});
 
 const app = express();
 const port = process.env.PORT || 8080;
@@ -169,7 +181,22 @@ async function deleteCustomer(iBusinessNumber, iCustomerNumber) {
   await dbPool.query('CALL sms_usp_Customer_DEL(?, ?)', [iBusinessNumber, iCustomerNumber]);
 }
 
-async function sendBandwidthMessage({ from, to, text }) {
+async function insertMedia({ uidMediaId, iMessageId, providerId, iContentLength }) {
+  const [rows] = await dbPool.query(
+    'CALL sms_usp_Media_INS(?, ?, ?, ?)',
+    [uidMediaId, iMessageId, providerId, iContentLength]
+  );
+  const resultRow = rows?.[0]?.[0];
+  console.log(`[media] Inserted media ${uidMediaId} for message ${iMessageId}`);
+  return resultRow;
+}
+
+async function getMediaForMessage(iMessageId) {
+  const [rows] = await dbPool.query('CALL sms_usp_MediaByMessage_GET(?)', [iMessageId]);
+  return rows?.[0] || [];
+}
+
+async function sendBandwidthMessage({ from, to, text, media }) {
   const url = `${process.env.BANDWIDTH_MESSAGING_API_BASE_URL || 'https://messaging.bandwidth.com/api/v2'}/users/${process.env.BANDWIDTH_ACCOUNT_ID}/messages`;
   const auth = Buffer.from(`${process.env.BANDWIDTH_API_TOKEN}:${process.env.BANDWIDTH_API_SECRET}`).toString('base64');
   const response = await fetch(url, {
@@ -182,7 +209,8 @@ async function sendBandwidthMessage({ from, to, text }) {
       applicationId: process.env.BANDWIDTH_APPLICATION_ID,
       from,
       to: [to],
-      text
+      text,
+      ...(media?.length ? { media } : {})
     })
   });
 
@@ -234,7 +262,14 @@ app.get('/api/conversations/:customer/messages', async (req, res, next) => {
     const business = normalizeUs10(req.query.businessNumber);
     if (!business) return res.status(400).json({ error: 'businessNumber required' });
     const customer = normalizeUs10(req.params.customer);
-    const items = await getConversationMessages(business, customer);
+    const messages = await getConversationMessages(business, customer);
+
+    // Attach media to each message
+    const items = await Promise.all(messages.map(async (msg) => {
+      const media = await getMediaForMessage(msg.iMessageId);
+      return { ...msg, media };
+    }));
+
     res.json({ items });
   } catch (error) {
     next(error);
@@ -288,35 +323,114 @@ app.delete('/api/conversations/:customer', async (req, res, next) => {
   }
 });
 
-app.post('/api/conversations/:customer/send', async (req, res) => {
+app.post('/api/conversations/:customer/send', upload.array('files', 10), async (req, res) => {
   try {
     const business = normalizeUs10(req.body?.businessNumber ?? req.query.businessNumber);
     if (!business) return res.status(400).json({ error: 'businessNumber required' });
     const customer = normalizeUs10(req.params.customer);
     const text = String(req.body?.text ?? '').trim();
-    if (!customer || !text) return res.status(400).json({ error: 'customer and text required' });
+    const files = req.files || [];
 
+    if (!customer || (!text && files.length === 0)) {
+      return res.status(400).json({ error: 'customer and text or files required' });
+    }
+
+    // ── Process outbound media uploads ─────────────────────────────────────
+    const bandwidthMediaUrls = [];
+    const mediaRecords = []; // to insert after message is created
+
+    for (const file of files) {
+      try {
+        const uidMediaId = uuidv4();
+        const originalName = file.originalname || 'attachment';
+        // Append last 4 chars of UUID to prevent filename collisions
+        const ext = path.extname(originalName);
+        const base = path.basename(originalName, ext);
+        const displayName = `${base}-${uidMediaId.slice(-4)}${ext}`;
+
+        // Read the uploaded temp file
+        const buffer = fs.readFileSync(file.path);
+        const contentType = await detectMimeType(buffer);
+
+        // Build storage path and save to media volume
+        const { dir, filePath, thumbPath } = buildStoragePaths(business, customer, '_outbound', uidMediaId, displayName);
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(filePath, buffer);
+        console.log(`[send] Saved outbound file: ${filePath} (${buffer.length} bytes, ${contentType})`);
+
+        // Generate thumbnail
+        const thumbGenerated = await generateThumbnail(filePath, thumbPath, contentType);
+        const thumbnailPath = thumbGenerated ? relativeStoragePath(thumbPath) : null;
+
+        // Upload to Bandwidth
+        const bandwidthMediaName = `echo-${uidMediaId}-${displayName}`;
+        const bandwidthUrl = await uploadMedia(bandwidthMediaName, buffer, contentType);
+        bandwidthMediaUrls.push(bandwidthUrl);
+
+        // Queue media record for DB insert after message is created
+        mediaRecords.push({
+          uidMediaId,
+          providerId: bandwidthUrl,
+          iContentLength: buffer.length,
+          displayName,
+          contentType,
+          storagePath: relativeStoragePath(filePath),
+          thumbnailPath
+        });
+
+        // Clean up multer temp file
+        fs.unlinkSync(file.path);
+      } catch (fileErr) {
+        console.error(`[send] Failed to process file ${file.originalname}:`, fileErr.message);
+        if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+      }
+    }
+
+    // ── Send via Bandwidth ────────────────────────────────────────────────
     const data = await sendBandwidthMessage({
       from: toE164Us10(business),
       to: toE164Us10(customer),
-      text
+      text: text || '',
+      media: bandwidthMediaUrls.length > 0 ? bandwidthMediaUrls : undefined
     });
 
+    // ── Insert message + media records in DB ──────────────────────────────
     const sMessageId = data?.id;
+    let iMessageId = null;
     if (sMessageId) {
-      await insertMessage({
+      iMessageId = await insertMessage({
         sMessageId,
         bInbound: false,
         iBusinessNumber: business,
         iCustomerNumber: customer,
-        text,
+        text: text || '',
         dtCreated: toMysqlDateTime3(),
         eMessageEventTypeID: 2
       });
+
+      // Insert media records linked to the message
+      for (const rec of mediaRecords) {
+        try {
+          await insertMedia({
+            uidMediaId: rec.uidMediaId,
+            iMessageId,
+            providerId: rec.providerId,
+            iContentLength: rec.iContentLength
+          });
+          // Immediately mark as obtained since we already have the file
+          await dbPool.query('CALL sms_usp_Media_SET(?, ?, ?, ?, ?)', [
+            rec.uidMediaId, true, rec.storagePath, rec.contentType, rec.thumbnailPath
+          ]);
+        } catch (mediaErr) {
+          console.error(`[send] Failed to insert media record ${rec.uidMediaId}:`, mediaErr.message);
+        }
+      }
     }
 
     return res.json({ ok: true, provider: data });
   } catch (error) {
+    // Clean up any remaining temp files
+    if (req.files) req.files.forEach(f => { if (fs.existsSync(f.path)) fs.unlinkSync(f.path); });
     const details = error?.response?.data ?? error?.message;
     return res.status(200).json({ ok: false, error: 'Provider send failed', details });
   }
@@ -347,7 +461,7 @@ async function processBandwidthEvents(events) {
       }
 
       if (eventType === 'message-received') {
-        await insertMessage({
+        const iMessageId = await insertMessage({
           sMessageId,
           bInbound: true,
           iBusinessNumber: normalizeUs10(raw.message?.to ?? raw.to),
@@ -356,6 +470,29 @@ async function processBandwidthEvents(events) {
           dtCreated: toMysqlDateTime3(raw.message?.time ?? raw.time),
           eMessageEventTypeID: eventTypeId
         });
+
+        // Handle inbound media attachments
+        if (iMessageId && raw.message?.media && Array.isArray(raw.message.media)) {
+          console.log(`[webhook] Inbound message ${sMessageId} has ${raw.message.media.length} media item(s)`);
+          for (const mediaUrl of raw.message.media) {
+            try {
+              const uidMediaId = uuidv4();
+              await insertMedia({
+                uidMediaId,
+                iMessageId,
+                providerId: mediaUrl,
+                iContentLength: 0
+              });
+            } catch (mediaErr) {
+              console.error(`[webhook] Failed to insert media for ${sMessageId}:`, mediaErr.message);
+            }
+          }
+          // Fire-and-forget: download & process media asynchronously
+          obtainPendingMedia(dbPool, iMessageId).catch(err =>
+            console.error(`[webhook] Async media obtain failed for message ${iMessageId}:`, err.message)
+          );
+        }
+
         stored += 1;
         continue;
       }
@@ -378,6 +515,32 @@ async function processBandwidthEvents(events) {
 
   return { ok: true, stored, duplicates, invalid, lostEvents, errors };
 }
+
+// ── Media obtain trigger endpoints ──────────────────────────────────────────
+
+app.post('/api/media/obtain', async (_req, res, next) => {
+  try {
+    console.log('[api] Triggering obtain for ALL pending media');
+    const result = await obtainPendingMedia(dbPool, null);
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/media/obtain/:messageId', async (req, res, next) => {
+  try {
+    const messageId = Number(req.params.messageId);
+    if (!messageId) return res.status(400).json({ error: 'messageId required' });
+    console.log(`[api] Triggering obtain for message ${messageId}`);
+    const result = await obtainPendingMedia(dbPool, messageId);
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ── Webhooks ────────────────────────────────────────────────────────────────
 
 app.post('/webhooks/bandwidth/inbound', requireWebhookBasicAuth, async (req, res) => {
   if (!Array.isArray(req.body)) {

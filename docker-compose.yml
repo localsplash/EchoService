@@ -8,3 +8,9 @@ services:
       - CORS_ORIGINS=*
     ports:
       - "127.0.0.1:18080:8080"
+    volumes:
+      - echo_media_data:/media
+
+volumes:
+  echo_media_data:
+    external: true
