@@ -8,7 +8,7 @@ const app = express();
 const port = process.env.PORT || 8080;
 const explicitOrigins = (process.env.CORS_ORIGINS || '')
   .split(',')
-  .map(s => s.trim())
+  .map((s) => s.trim())
   .filter(Boolean);
 const webhookUser = process.env.WEBHOOK_BASIC_USER || '';
 const webhookPass = process.env.WEBHOOK_BASIC_PASS || '';
@@ -68,10 +68,17 @@ function normalizeUs10(value) {
   return Number(digits.slice(-10) || 0);
 }
 
+function toE164Us10(value) {
+  const digits = String(value).replace(/\D/g, '');
+  const normalized = digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
+  if (normalized.length !== 10) throw new Error('Phone number must be 10 digits');
+  return `+1${normalized}`;
+}
+
 function toMysqlDateTime3(value) {
   const d = value ? new Date(value) : new Date();
   const pad = (n, len = 2) => String(n).padStart(len, '0');
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth()+1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}.${pad(d.getUTCMilliseconds(),3)}`;
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}.${pad(d.getUTCMilliseconds(), 3)}`;
 }
 
 function resolveEventTypeId(eventType) {
@@ -101,6 +108,93 @@ async function setMessageEventByExternalMessageId(params) {
   return Boolean(resultRow?.updated);
 }
 
+async function listConversations(iBusinessNumber) {
+  const [rows] = await dbPool.query(
+    `SELECT
+        m.iCustomerNumber,
+        MAX(m.dtCreated) AS lastAt,
+        SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(m.text, '') ORDER BY m.dtCreated DESC SEPARATOR '\n'), '\n', 1) AS lastText,
+        CAST(SUBSTRING_INDEX(GROUP_CONCAT(COALESCE(m.eMessageEventTypeID, 0) ORDER BY m.dtCreated DESC SEPARATOR ','), ',', 1) AS UNSIGNED) AS lastEventType,
+        SUM(CASE WHEN m.bInbound = 1 AND m.bIsRead = 0 THEN 1 ELSE 0 END) AS unreadCount
+      FROM sms_tbl_Message m
+      WHERE m.iBusinessNumber = ?
+      GROUP BY m.iCustomerNumber
+      ORDER BY lastAt DESC`,
+    [iBusinessNumber]
+  );
+  return rows || [];
+}
+
+async function getConversationMessages(iBusinessNumber, iCustomerNumber) {
+  const [rows] = await dbPool.query(
+    `SELECT
+        iMessageId,
+        sMessageId,
+        bInbound,
+        iBusinessNumber,
+        iCustomerNumber,
+        text,
+        dtCreated,
+        eMessageEventTypeID,
+        bIsRead
+      FROM sms_tbl_Message
+      WHERE iBusinessNumber = ? AND iCustomerNumber = ?
+      ORDER BY dtCreated ASC, iMessageId ASC`,
+    [iBusinessNumber, iCustomerNumber]
+  );
+  return rows || [];
+}
+
+async function markConversationRead(iBusinessNumber, iCustomerNumber) {
+  await dbPool.query(
+    `UPDATE sms_tbl_Message
+      SET bIsRead = 1
+      WHERE iBusinessNumber = ?
+        AND iCustomerNumber = ?
+        AND bInbound = 1
+        AND bIsRead = 0`,
+    [iBusinessNumber, iCustomerNumber]
+  );
+}
+
+async function markLatestConversationUnread(iBusinessNumber, iCustomerNumber) {
+  await dbPool.query('CALL sms_usp_MessageReadLatest_SET(?, ?, 0)', [iBusinessNumber, iCustomerNumber]);
+}
+
+async function deleteMessage(iMessageId) {
+  await dbPool.query('CALL sms_usp_Message_DEL(?)', [iMessageId]);
+}
+
+async function deleteCustomer(iBusinessNumber, iCustomerNumber) {
+  await dbPool.query('CALL sms_usp_Customer_DEL(?, ?)', [iBusinessNumber, iCustomerNumber]);
+}
+
+async function sendBandwidthMessage({ from, to, text }) {
+  const url = `${process.env.BANDWIDTH_MESSAGING_API_BASE_URL || 'https://messaging.bandwidth.com/api/v2'}/users/${process.env.BANDWIDTH_ACCOUNT_ID}/messages`;
+  const auth = Buffer.from(`${process.env.BANDWIDTH_API_TOKEN}:${process.env.BANDWIDTH_API_SECRET}`).toString('base64');
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${auth}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      applicationId: process.env.BANDWIDTH_APPLICATION_ID,
+      from,
+      to: [to],
+      text
+    })
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const err = new Error('Provider send failed');
+    err.response = { data, status: response.status };
+    throw err;
+  }
+  return data;
+}
+
 app.use(helmet());
 app.use(express.json({ limit: '1mb' }));
 app.use(morgan('combined'));
@@ -124,22 +218,118 @@ app.get('/ping', (_req, res) => {
   res.json({ message: 'pong', service: 'EchoService' });
 });
 
-app.post('/echo', (req, res) => {
-  res.json({ ok: true, received: req.body || null });
+app.get('/api/conversations', async (req, res, next) => {
+  try {
+    const business = normalizeUs10(req.query.businessNumber);
+    if (!business) return res.status(400).json({ error: 'businessNumber required' });
+    const items = await listConversations(business);
+    res.json({ items });
+  } catch (error) {
+    next(error);
+  }
 });
 
-app.post('/webhooks/bandwidth/inbound', requireWebhookBasicAuth, async (req, res) => {
-  if (!Array.isArray(req.body)) {
-    return res.status(400).json({ ok: false, error: 'Payload must be an array' });
+app.get('/api/conversations/:customer/messages', async (req, res, next) => {
+  try {
+    const business = normalizeUs10(req.query.businessNumber);
+    if (!business) return res.status(400).json({ error: 'businessNumber required' });
+    const customer = normalizeUs10(req.params.customer);
+    const items = await getConversationMessages(business, customer);
+    res.json({ items });
+  } catch (error) {
+    next(error);
   }
+});
 
+app.post('/api/conversations/:customer/read', async (req, res, next) => {
+  try {
+    const business = normalizeUs10(req.body?.businessNumber ?? req.query.businessNumber);
+    if (!business) return res.status(400).json({ error: 'businessNumber required' });
+    const customer = normalizeUs10(req.params.customer);
+    await markConversationRead(business, customer);
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/conversations/:customer/mark-unread', async (req, res, next) => {
+  try {
+    const business = normalizeUs10(req.body?.businessNumber ?? req.query.businessNumber);
+    if (!business) return res.status(400).json({ error: 'businessNumber required' });
+    const customer = normalizeUs10(req.params.customer);
+    await markLatestConversationUnread(business, customer);
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete('/api/messages/:messageId', async (req, res, next) => {
+  try {
+    const messageId = Number(req.params.messageId);
+    if (!messageId) return res.status(400).json({ error: 'messageId required' });
+    await deleteMessage(messageId);
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete('/api/conversations/:customer', async (req, res, next) => {
+  try {
+    const business = normalizeUs10(req.body?.businessNumber ?? req.query.businessNumber);
+    if (!business) return res.status(400).json({ error: 'businessNumber required' });
+    const customer = normalizeUs10(req.params.customer);
+    await deleteCustomer(business, customer);
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/conversations/:customer/send', async (req, res) => {
+  try {
+    const business = normalizeUs10(req.body?.businessNumber ?? req.query.businessNumber);
+    if (!business) return res.status(400).json({ error: 'businessNumber required' });
+    const customer = normalizeUs10(req.params.customer);
+    const text = String(req.body?.text ?? '').trim();
+    if (!customer || !text) return res.status(400).json({ error: 'customer and text required' });
+
+    const data = await sendBandwidthMessage({
+      from: toE164Us10(business),
+      to: toE164Us10(customer),
+      text
+    });
+
+    const sMessageId = data?.id;
+    if (sMessageId) {
+      await insertMessage({
+        sMessageId,
+        bInbound: false,
+        iBusinessNumber: business,
+        iCustomerNumber: customer,
+        text,
+        dtCreated: toMysqlDateTime3(),
+        eMessageEventTypeID: 2
+      });
+    }
+
+    return res.json({ ok: true, provider: data });
+  } catch (error) {
+    const details = error?.response?.data ?? error?.message;
+    return res.status(200).json({ ok: false, error: 'Provider send failed', details });
+  }
+});
+
+async function processBandwidthEvents(events) {
   let stored = 0;
   let duplicates = 0;
   let invalid = 0;
   let lostEvents = 0;
   let errors = 0;
 
-  for (const raw of req.body) {
+  for (const raw of events) {
     try {
       const sMessageId = raw?.message?.id;
       const eventType = raw?.type;
@@ -186,11 +376,21 @@ app.post('/webhooks/bandwidth/inbound', requireWebhookBasicAuth, async (req, res
     }
   }
 
-  return res.json({ ok: true, stored, duplicates, invalid, lostEvents, errors });
+  return { ok: true, stored, duplicates, invalid, lostEvents, errors };
+}
+
+app.post('/webhooks/bandwidth/inbound', requireWebhookBasicAuth, async (req, res) => {
+  if (!Array.isArray(req.body)) {
+    return res.status(400).json({ ok: false, error: 'Payload must be an array' });
+  }
+  return res.json(await processBandwidthEvents(req.body));
 });
 
 app.post('/webhooks/bandwidth/status', requireWebhookBasicAuth, async (req, res) => {
-  return app._router.handle({ ...req, url: '/webhooks/bandwidth/inbound', method: 'POST' }, res, () => {});
+  if (!Array.isArray(req.body)) {
+    return res.status(400).json({ ok: false, error: 'Payload must be an array' });
+  }
+  return res.json(await processBandwidthEvents(req.body));
 });
 
 app.use((err, _req, res, _next) => {
