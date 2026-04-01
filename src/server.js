@@ -5,14 +5,33 @@ const morgan = require('morgan');
 
 const app = express();
 const port = process.env.PORT || 8080;
-const allowedOrigins = (process.env.CORS_ORIGINS || '*').split(',').map(s => s.trim()).filter(Boolean);
+const explicitOrigins = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
+function isAllowedOrigin(origin) {
+  if (!origin) return true;
+  try {
+    const u = new URL(origin);
+    const host = u.hostname.toLowerCase();
+    const isLocal = host === 'localhost' || host === '127.0.0.1';
+    const isWisp = host === 'wisp.net' || host.endsWith('.wisp.net');
+    if (isLocal) return true;
+    if (u.protocol === 'https:' && isWisp) return true;
+    if (explicitOrigins.includes(origin)) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
 
 app.use(helmet());
 app.use(express.json({ limit: '1mb' }));
 app.use(morgan('combined'));
 app.use(cors({
   origin: (origin, cb) => {
-    if (!origin || allowedOrigins.includes('*') || allowedOrigins.includes(origin)) return cb(null, true);
+    if (isAllowedOrigin(origin)) return cb(null, true);
     return cb(new Error('CORS blocked'));
   }
 }));
@@ -21,12 +40,16 @@ app.get('/health', (_req, res) => {
   res.json({ ok: true, service: 'EchoService', timestamp: new Date().toISOString() });
 });
 
-app.get('/api/ping', (_req, res) => {
+app.get('/ping', (_req, res) => {
   res.json({ message: 'pong', service: 'EchoService' });
 });
 
-app.post('/api/echo', (req, res) => {
+app.post('/echo', (req, res) => {
   res.json({ ok: true, received: req.body || null });
+});
+
+app.post('/webhooks/messaging/inbound', (req, res) => {
+  res.json({ ok: true, webhook: 'messaging-inbound', received: req.body || null });
 });
 
 app.listen(port, '0.0.0.0', () => {
