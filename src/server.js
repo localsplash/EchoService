@@ -70,12 +70,12 @@ app.post('/echo', (req, res) => {
   res.json({ ok: true, received: req.body || null });
 });
 
-app.post('/webhooks/messaging/inbound', requireWebhookBasicAuth, (req, res) => {
-  res.json({ ok: true, webhook: 'messaging-inbound', received: req.body || null });
+app.post('/webhooks/bandwidth/inbound', requireWebhookBasicAuth, (req, res) => {
+  res.json({ ok: true, webhook: 'bandwidth-inbound', received: req.body || null });
 });
 
-app.post('/webhooks/messaging/status', requireWebhookBasicAuth, (req, res) => {
-  res.json({ ok: true, webhook: 'messaging-status', received: req.body || null });
+app.post('/webhooks/bandwidth/status', requireWebhookBasicAuth, (req, res) => {
+  res.json({ ok: true, webhook: 'bandwidth-status', received: req.body || null });
 });
 
 app.listen(port, '0.0.0.0', () => {
