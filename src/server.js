@@ -471,10 +471,33 @@ async function processBandwidthEvents(events) {
           eMessageEventTypeID: eventTypeId
         });
 
+        const inboundMedia = Array.isArray(raw.message?.media)
+          ? raw.message.media
+          : Array.isArray(raw.media)
+            ? raw.media
+            : Array.isArray(raw.message?.mediaUrls)
+              ? raw.message.mediaUrls
+              : Array.isArray(raw.mediaUrls)
+                ? raw.mediaUrls
+                : [];
+
+        if (iMessageId) {
+          console.log(`[webhook] inbound payload for ${sMessageId}: ${JSON.stringify({
+            type: raw.type,
+            hasMessageMedia: Array.isArray(raw.message?.media),
+            hasRootMedia: Array.isArray(raw.media),
+            hasMessageMediaUrls: Array.isArray(raw.message?.mediaUrls),
+            hasRootMediaUrls: Array.isArray(raw.mediaUrls),
+            inboundMediaCount: inboundMedia.length,
+            sampleKeys: Object.keys(raw || {}),
+            messageKeys: Object.keys(raw.message || {})
+          })}`);
+        }
+
         // Handle inbound media attachments
-        if (iMessageId && raw.message?.media && Array.isArray(raw.message.media)) {
-          console.log(`[webhook] Inbound message ${sMessageId} has ${raw.message.media.length} media item(s)`);
-          for (const mediaUrl of raw.message.media) {
+        if (iMessageId && inboundMedia.length > 0) {
+          console.log(`[webhook] Inbound message ${sMessageId} has ${inboundMedia.length} media item(s)`);
+          for (const mediaUrl of inboundMedia) {
             try {
               const uidMediaId = uuidv4();
               await insertMedia({
