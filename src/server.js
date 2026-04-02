@@ -238,6 +238,12 @@ async function getCarriers() {
 
 // ── Bandwidth message send ───────────────────────────────────────────────────
 
+function mask(val) {
+  if (!val) return '(empty)';
+  if (val.length <= 6) return '***';
+  return val.slice(0, 4) + '***' + val.slice(-2);
+}
+
 async function sendBandwidthMessage({ from, to, text, media, settings }) {
   const base = process.env.BANDWIDTH_MESSAGING_API_BASE_URL || 'https://messaging.bandwidth.com/api/v2';
   const accountId     = settings?.accountId     ?? process.env.BANDWIDTH_ACCOUNT_ID;
@@ -245,8 +251,24 @@ async function sendBandwidthMessage({ from, to, text, media, settings }) {
   const apiSecret     = settings?.apiSecret     ?? process.env.BANDWIDTH_API_SECRET;
   const applicationId = settings?.applicationId ?? process.env.BANDWIDTH_APPLICATION_ID;
 
+  const source = settings ? 'DB' : 'env';
+  console.log(`[send] Bandwidth credentials source: ${source}`);
+  console.log(`[send]   accountId:     ${mask(accountId)}`);
+  console.log(`[send]   apiToken:      ${mask(apiToken)}`);
+  console.log(`[send]   apiSecret:     ${mask(apiSecret)}`);
+  console.log(`[send]   applicationId: ${mask(applicationId)}`);
+  console.log(`[send]   from: ${from}  →  to: ${to}`);
+
+  if (!accountId || !apiToken || !apiSecret || !applicationId) {
+    const missing = [
+      !accountId && 'accountId', !apiToken && 'apiToken',
+      !apiSecret && 'apiSecret', !applicationId && 'applicationId'
+    ].filter(Boolean).join(', ');
+    console.error(`[send] MISSING CREDENTIALS (${missing}). Ensure this business phone is assigned to a CarrierApplication in Settings.`);
+  }
+
   const url  = `${base}/users/${accountId}/messages`;
-  const auth = Buffer.from(`${apiToken}:${apiSecret}`).toString('base64');
+  const auth = Buffer.from(`${apiToken || ''}:${apiSecret || ''}`).toString('base64');
   const response = await fetch(url, {
     method: 'POST',
     headers: {
@@ -264,10 +286,12 @@ async function sendBandwidthMessage({ from, to, text, media, settings }) {
 
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
+    console.error(`[send] Bandwidth ${response.status}: ${JSON.stringify(data)}`);
     const err = new Error('Provider send failed');
     err.response = { data, status: response.status };
     throw err;
   }
+  console.log(`[send] Bandwidth accepted: messageId=${data?.id}`);
   return data;
 }
 
@@ -386,8 +410,10 @@ app.post('/api/conversations/:customer/send', upload.array('files', 10), async (
     // ── Resolve carrier settings for this business phone ──────────────────
     const phoneRecord = await getBusinessPhoneSettings(business);
     const carrierSettings = phoneRecord?.jsonSettings ?? null;
-    if (!carrierSettings) {
-      console.warn(`[send] No DB carrier settings for ${business}, using env fallback`);
+    if (carrierSettings) {
+      console.log(`[send] Resolved DB carrier settings for ${business}: app="${phoneRecord.carrierApplicationName}" carrier="${phoneRecord.carrier}"`);
+    } else {
+      console.warn(`[send] No DB carrier settings for ${business} — business phone not yet assigned to a CarrierApplication. Falling back to env vars.`);
     }
 
     // ── Process outbound media uploads ─────────────────────────────────────
