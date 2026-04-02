@@ -145,6 +145,42 @@ function relativeStoragePath(absolutePath) {
   return absolutePath.replace(MEDIA_ROOT, '').replace(/\\/g, '/');
 }
 
+// ─── Carrier settings resolver ───────────────────────────────────────────────
+
+/**
+ * Look up carrier jsonSettings for a business number from the DB.
+ * Results are cached in the provided Map for the duration of a single obtain run.
+ *
+ * Falls back to null when the business phone is not yet in the DB, which causes
+ * bandwidth-media helpers to fall back to BANDWIDTH_* env vars.
+ *
+ * @param {import('mysql2/promise').Pool} dbPool
+ * @param {number} iBusinessNumber
+ * @param {Map<number, object|null>} cache
+ * @returns {Promise<object|null>}
+ */
+async function resolveCarrierSettings(dbPool, iBusinessNumber, cache) {
+  if (cache.has(iBusinessNumber)) return cache.get(iBusinessNumber);
+  try {
+    const [rows] = await dbPool.query('CALL sms_usp_BusinessPhone_GET(?)', [iBusinessNumber]);
+    const row = rows?.[0]?.[0];
+    if (row?.jsonSettings) {
+      const settings = typeof row.jsonSettings === 'string'
+        ? JSON.parse(row.jsonSettings)
+        : row.jsonSettings;
+      cache.set(iBusinessNumber, settings);
+      return settings;
+    }
+  } catch (err) {
+    console.warn(`[mediaObtain] Could not resolve carrier settings for ${iBusinessNumber}:`, err.message);
+  }
+  if (!cache.has(iBusinessNumber)) {
+    console.warn(`[mediaObtain] No DB carrier settings for ${iBusinessNumber}, using env fallback`);
+  }
+  cache.set(iBusinessNumber, null);
+  return null;
+}
+
 // ─── Main obtain worker ──────────────────────────────────────────────────────
 
 /**
@@ -157,6 +193,7 @@ function relativeStoragePath(absolutePath) {
  */
 async function obtainPendingMedia(dbPool, messageId = null) {
   const counts = { obtained: 0, failed: 0, skipped: 0 };
+  const settingsCache = new Map();
 
   console.log(`[mediaObtain] Starting obtain run (messageId=${messageId || 'ALL'})`);
 
@@ -175,10 +212,13 @@ async function obtainPendingMedia(dbPool, messageId = null) {
     try {
       console.log(`[mediaObtain] Processing ${item.uidMediaId} (${item.displayName}) from message ${item.iMessageId}`);
 
-      // 1. Download from Bandwidth
-      const { buffer, contentLength } = await downloadMedia(item.providerId);
+      // 1. Resolve carrier credentials for this business number
+      const carrierSettings = await resolveCarrierSettings(dbPool, item.iBusinessNumber, settingsCache);
 
-      // 2. Detect MIME type via magic bytes
+      // 2. Download from Bandwidth
+      const { buffer, contentLength } = await downloadMedia(item.providerId, carrierSettings);
+
+      // 3. Detect MIME type via magic bytes
       const contentType = await detectMimeType(buffer);
 
       // 3. Build storage paths

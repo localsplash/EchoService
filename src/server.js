@@ -196,9 +196,57 @@ async function getMediaForMessage(iMessageId) {
   return rows?.[0] || [];
 }
 
-async function sendBandwidthMessage({ from, to, text, media }) {
-  const url = `${process.env.BANDWIDTH_MESSAGING_API_BASE_URL || 'https://messaging.bandwidth.com/api/v2'}/users/${process.env.BANDWIDTH_ACCOUNT_ID}/messages`;
-  const auth = Buffer.from(`${process.env.BANDWIDTH_API_TOKEN}:${process.env.BANDWIDTH_API_SECRET}`).toString('base64');
+// ── Carrier / business-phone DB functions ────────────────────────────────────
+
+async function getBusinessPhoneSettings(iBusinessNumber) {
+  const [rows] = await dbPool.query('CALL sms_usp_BusinessPhone_GET(?)', [iBusinessNumber]);
+  const row = rows?.[0]?.[0];
+  if (!row) return null;
+  return {
+    ...row,
+    jsonSettings: typeof row.jsonSettings === 'string' ? JSON.parse(row.jsonSettings) : row.jsonSettings
+  };
+}
+
+async function getBusinessPhone(iBusinessNumber) {
+  const [rows] = await dbPool.query('CALL sms_usp_BusinessPhone_GET(?)', [iBusinessNumber ?? null]);
+  return rows?.[0] || [];
+}
+
+async function setBusinessPhone(iBusinessNumber, displayName, iCarrierApplicationId) {
+  await dbPool.query('CALL sms_usp_BusinessPhone_SET(?, ?, ?)', [iBusinessNumber, displayName ?? null, iCarrierApplicationId]);
+}
+
+async function getCarrierApplications(iCarrierApplicationId) {
+  const [rows] = await dbPool.query('CALL sms_usp_CarrierApplication_GET(?)', [iCarrierApplicationId ?? null]);
+  return rows?.[0] || [];
+}
+
+async function setCarrierApplication(iCarrierApplicationId, name, eCarrierId, jsonSettings) {
+  const settingsJson = typeof jsonSettings === 'string' ? jsonSettings : JSON.stringify(jsonSettings);
+  const [rows] = await dbPool.query(
+    'CALL sms_usp_CarrierApplication_SET(?, ?, ?, ?)',
+    [iCarrierApplicationId ?? null, name, eCarrierId, settingsJson]
+  );
+  return rows?.[0]?.[0]?.iCarrierApplicationId ?? null;
+}
+
+async function getCarriers() {
+  const [rows] = await dbPool.query('SELECT eCarrierId, carrier, description FROM sms_lkp_Carrier ORDER BY eCarrierId');
+  return rows || [];
+}
+
+// ── Bandwidth message send ───────────────────────────────────────────────────
+
+async function sendBandwidthMessage({ from, to, text, media, settings }) {
+  const base = process.env.BANDWIDTH_MESSAGING_API_BASE_URL || 'https://messaging.bandwidth.com/api/v2';
+  const accountId     = settings?.accountId     ?? process.env.BANDWIDTH_ACCOUNT_ID;
+  const apiToken      = settings?.apiToken      ?? process.env.BANDWIDTH_API_TOKEN;
+  const apiSecret     = settings?.apiSecret     ?? process.env.BANDWIDTH_API_SECRET;
+  const applicationId = settings?.applicationId ?? process.env.BANDWIDTH_APPLICATION_ID;
+
+  const url  = `${base}/users/${accountId}/messages`;
+  const auth = Buffer.from(`${apiToken}:${apiSecret}`).toString('base64');
   const response = await fetch(url, {
     method: 'POST',
     headers: {
@@ -206,7 +254,7 @@ async function sendBandwidthMessage({ from, to, text, media }) {
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({
-      applicationId: process.env.BANDWIDTH_APPLICATION_ID,
+      applicationId,
       from,
       to: [to],
       text,
@@ -335,6 +383,13 @@ app.post('/api/conversations/:customer/send', upload.array('files', 10), async (
       return res.status(400).json({ error: 'customer and text or files required' });
     }
 
+    // ── Resolve carrier settings for this business phone ──────────────────
+    const phoneRecord = await getBusinessPhoneSettings(business);
+    const carrierSettings = phoneRecord?.jsonSettings ?? null;
+    if (!carrierSettings) {
+      console.warn(`[send] No DB carrier settings for ${business}, using env fallback`);
+    }
+
     // ── Process outbound media uploads ─────────────────────────────────────
     const bandwidthMediaUrls = [];
     const mediaRecords = []; // to insert after message is created
@@ -364,7 +419,7 @@ app.post('/api/conversations/:customer/send', upload.array('files', 10), async (
 
         // Upload to Bandwidth
         const bandwidthMediaName = `echo-${uidMediaId}-${displayName}`;
-        const bandwidthUrl = await uploadMedia(bandwidthMediaName, buffer, contentType);
+        const bandwidthUrl = await uploadMedia(bandwidthMediaName, buffer, contentType, carrierSettings);
         bandwidthMediaUrls.push(bandwidthUrl);
 
         // Queue media record for DB insert after message is created
@@ -391,7 +446,8 @@ app.post('/api/conversations/:customer/send', upload.array('files', 10), async (
       from: toE164Us10(business),
       to: toE164Us10(customer),
       text: text || '',
-      media: bandwidthMediaUrls.length > 0 ? bandwidthMediaUrls : undefined
+      media: bandwidthMediaUrls.length > 0 ? bandwidthMediaUrls : undefined,
+      settings: carrierSettings
     });
 
     // ── Insert message + media records in DB ──────────────────────────────
@@ -433,6 +489,91 @@ app.post('/api/conversations/:customer/send', upload.array('files', 10), async (
     if (req.files) req.files.forEach(f => { if (fs.existsSync(f.path)) fs.unlinkSync(f.path); });
     const details = error?.response?.data ?? error?.message;
     return res.status(200).json({ ok: false, error: 'Provider send failed', details });
+  }
+});
+
+// ── Carrier & business-phone management API ──────────────────────────────────
+
+app.get('/api/carriers', async (_req, res, next) => {
+  try {
+    const items = await getCarriers();
+    res.json({ items });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/carrier-applications', async (_req, res, next) => {
+  try {
+    const items = await getCarrierApplications(null);
+    res.json({ items });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/carrier-applications/:id', async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ error: 'id required' });
+    const items = await getCarrierApplications(id);
+    const item = items[0] ?? null;
+    if (!item) return res.status(404).json({ error: 'Not found' });
+    res.json({ item });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/carrier-applications', async (req, res, next) => {
+  try {
+    const { name, eCarrierId, jsonSettings } = req.body || {};
+    if (!name || !eCarrierId || !jsonSettings) {
+      return res.status(400).json({ error: 'name, eCarrierId, jsonSettings required' });
+    }
+    const id = await setCarrierApplication(null, name, Number(eCarrierId), jsonSettings);
+    res.json({ ok: true, iCarrierApplicationId: id });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put('/api/carrier-applications/:id', async (req, res, next) => {
+  try {
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ error: 'id required' });
+    const { name, eCarrierId, jsonSettings } = req.body || {};
+    if (!name || !eCarrierId || !jsonSettings) {
+      return res.status(400).json({ error: 'name, eCarrierId, jsonSettings required' });
+    }
+    await setCarrierApplication(id, name, Number(eCarrierId), jsonSettings);
+    res.json({ ok: true, iCarrierApplicationId: id });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/business-phones/:number', async (req, res, next) => {
+  try {
+    const number = normalizeUs10(req.params.number);
+    if (!number) return res.status(400).json({ error: 'number required' });
+    const items = await getBusinessPhone(number);
+    res.json({ item: items[0] ?? null });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/business-phones', async (req, res, next) => {
+  try {
+    const { iBusinessNumber, displayName, iCarrierApplicationId } = req.body || {};
+    const number = normalizeUs10(iBusinessNumber);
+    if (!number) return res.status(400).json({ error: 'iBusinessNumber required' });
+    if (!iCarrierApplicationId) return res.status(400).json({ error: 'iCarrierApplicationId required' });
+    await setBusinessPhone(number, displayName ?? null, Number(iCarrierApplicationId));
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
   }
 });
 

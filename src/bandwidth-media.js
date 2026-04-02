@@ -1,32 +1,38 @@
 /**
  * Bandwidth Media API helpers
  *
- * - downloadMedia(providerUrl)  → { buffer, contentLength }
- * - uploadMedia(mediaName, buffer, contentType) → public Bandwidth media URL
+ * - downloadMedia(providerUrl, settings)           → { buffer, contentLength }
+ * - uploadMedia(mediaName, buffer, contentType, settings) → public Bandwidth media URL
+ *
+ * settings: parsed jsonSettings from sms_tbl_CarrierApplication
+ *   { accountId, apiToken, apiSecret, applicationId }
+ *
+ * Falls back to BANDWIDTH_* env vars when settings are not provided
+ * (backward-compat during migration before all business phones are in DB).
  *
  * Reference: https://dev.bandwidth.com/docs/messaging/media/
  */
 
 const BANDWIDTH_BASE = process.env.BANDWIDTH_MESSAGING_API_BASE_URL || 'https://messaging.bandwidth.com/api/v2';
-const ACCOUNT_ID     = process.env.BANDWIDTH_ACCOUNT_ID || '';
-const API_TOKEN      = process.env.BANDWIDTH_API_TOKEN || '';
-const API_SECRET     = process.env.BANDWIDTH_API_SECRET || '';
 
-function basicAuthHeader() {
-  return 'Basic ' + Buffer.from(`${API_TOKEN}:${API_SECRET}`).toString('base64');
+function basicAuthHeader(settings) {
+  const token  = settings?.apiToken  ?? process.env.BANDWIDTH_API_TOKEN  ?? '';
+  const secret = settings?.apiSecret ?? process.env.BANDWIDTH_API_SECRET ?? '';
+  return 'Basic ' + Buffer.from(`${token}:${secret}`).toString('base64');
 }
 
 /**
  * Download a media file from Bandwidth's temporary URL.
  * @param {string} providerUrl - The Bandwidth media URL (from inbound webhook)
+ * @param {object|null} settings - Carrier settings from DB (apiToken, apiSecret)
  * @returns {Promise<{ buffer: Buffer, contentLength: number }>}
  */
-async function downloadMedia(providerUrl) {
+async function downloadMedia(providerUrl, settings) {
   console.log(`[bandwidth-media] Downloading: ${providerUrl}`);
 
   const response = await fetch(providerUrl, {
     method: 'GET',
-    headers: { Authorization: basicAuthHeader() }
+    headers: { Authorization: basicAuthHeader(settings) }
   });
 
   if (!response.ok) {
@@ -45,19 +51,21 @@ async function downloadMedia(providerUrl) {
  *
  * PUT /users/{accountId}/media/{mediaName}
  *
- * @param {string} mediaName  - Unique name for the media (used in the URL)
- * @param {Buffer} buffer     - File contents
+ * @param {string} mediaName   - Unique name for the media (used in the URL)
+ * @param {Buffer} buffer      - File contents
  * @param {string} contentType - MIME type
+ * @param {object|null} settings - Carrier settings from DB (accountId, apiToken, apiSecret)
  * @returns {Promise<string>} The public Bandwidth media URL to include in message.media[]
  */
-async function uploadMedia(mediaName, buffer, contentType) {
-  const url = `${BANDWIDTH_BASE}/users/${ACCOUNT_ID}/media/${encodeURIComponent(mediaName)}`;
+async function uploadMedia(mediaName, buffer, contentType, settings) {
+  const accountId = settings?.accountId ?? process.env.BANDWIDTH_ACCOUNT_ID ?? '';
+  const url = `${BANDWIDTH_BASE}/users/${accountId}/media/${encodeURIComponent(mediaName)}`;
   console.log(`[bandwidth-media] Uploading ${buffer.length} bytes as "${mediaName}" to ${url}`);
 
   const response = await fetch(url, {
     method: 'PUT',
     headers: {
-      Authorization: basicAuthHeader(),
+      Authorization: basicAuthHeader(settings),
       'Content-Type': contentType || 'application/octet-stream',
       'Content-Length': String(buffer.length)
     },
@@ -69,7 +77,7 @@ async function uploadMedia(mediaName, buffer, contentType) {
     throw new Error(`Bandwidth upload failed (${response.status}): ${text}`);
   }
 
-  const mediaUrl = `${BANDWIDTH_BASE}/users/${ACCOUNT_ID}/media/${encodeURIComponent(mediaName)}`;
+  const mediaUrl = `${BANDWIDTH_BASE}/users/${accountId}/media/${encodeURIComponent(mediaName)}`;
   console.log(`[bandwidth-media] Uploaded successfully: ${mediaUrl}`);
   return mediaUrl;
 }
