@@ -6,11 +6,21 @@ services:
     environment:
       - PORT=8080
       - CORS_ORIGINS=*
+      - DB_HOST=echo-database
+      - DB_USER=${DB_USER:-echo_app}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME:-echo_db}
     ports:
       - "127.0.0.1:18080:8080"
     volumes:
       - echo_media_data:/media
+    networks:
+      - echo-net
 
 volumes:
   echo_media_data:
+    external: true
+
+networks:
+  echo-net:
     external: true
