@@ -1,36 +1,20 @@
+# Standalone dev — for full stack use EchoOrchestrator instead.
 services:
   echo-service:
     build: .
     container_name: echo-service
-    hostname: echo-service
-    env_file:
-      - .env
-    restart: unless-stopped
     environment:
-      - PORT=8080
-      - CORS_ORIGINS=*
-      - DB_HOST=echo-database
-      - DB_USER=${DB_USER:-echo_app}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - DB_NAME=${DB_NAME:-echo_db}
+      PORT: "8080"
+      DB_HOST: ${DB_HOST:-host.docker.internal}
+      DB_USER: ${DB_USER:-echo_app}
+      DB_PASSWORD: ${DB_PASSWORD:-devpass}
+      DB_NAME: ${DB_NAME:-echo_db}
+      CORS_ORIGINS: "*"
     ports:
       - "127.0.0.1:18080:8080"
     volumes:
       - echo_media_data:/media
-    networks:
-      echo-net:
-        aliases:
-          - echo-service
-      dokku_network:
-        aliases:
-          - echo-service
+    restart: unless-stopped
 
 volumes:
   echo_media_data:
-    external: true
-
-networks:
-  echo-net:
-    external: true
-  dokku_network:
-    external: true
