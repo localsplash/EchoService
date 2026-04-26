@@ -8,7 +8,7 @@ const { v4: uuidv4 } = require('uuid');
 const fs = require('fs');
 const path = require('path');
 const { uploadMedia } = require('./bandwidth-media');
-const { obtainPendingMedia, detectMimeType, buildStoragePaths, relativeStoragePath, generateThumbnail, MEDIA_ROOT } = require('./mediaObtain');
+const { obtainPendingMedia, detectMimeType, extensionForMime, mimeFromExtension, buildStoragePaths, buildDraftStoragePaths, relativeStoragePath, generateThumbnail, MEDIA_ROOT } = require('./mediaObtain');
 
 // Multer: store uploads in temp dir, max 3.5 MB per file, max 10 files
 const upload = multer({
@@ -194,6 +194,47 @@ async function insertMedia({ uidMediaId, iMessageId, providerId, iContentLength 
 async function getMediaForMessage(iMessageId) {
   const [rows] = await dbPool.query('CALL sms_usp_MediaByMessage_GET(?)', [iMessageId]);
   return rows?.[0] || [];
+}
+
+async function insertDraftMedia({ uidDraftMediaId, iBusinessNumber, iCustomerNumber, displayName, contentType, iContentLength, storagePath, thumbnailPath }) {
+  await dbPool.query(
+    'CALL sms_usp_DraftMedia_INS(?, ?, ?, ?, ?, ?, ?, ?)',
+    [uidDraftMediaId, iBusinessNumber, iCustomerNumber, displayName, contentType, iContentLength, storagePath, thumbnailPath ?? null]
+  );
+}
+
+async function getDraftMedia(uidDraftMediaId) {
+  const [rows] = await dbPool.query('CALL sms_usp_DraftMedia_GET(?)', [uidDraftMediaId]);
+  return rows?.[0]?.[0] ?? null;
+}
+
+async function getDraftMediaByCustomer(iBusinessNumber, iCustomerNumber) {
+  const [rows] = await dbPool.query('CALL sms_usp_DraftMediaByCustomer_GET(?, ?)', [iBusinessNumber, iCustomerNumber]);
+  return rows?.[0] || [];
+}
+
+async function deleteDraftMedia(uidDraftMediaId) {
+  // Returns the pre-delete row (first result set) so callers can unlink files.
+  const [rows] = await dbPool.query('CALL sms_usp_DraftMedia_DEL(?)', [uidDraftMediaId]);
+  return rows?.[0]?.[0] ?? null;
+}
+
+function unlinkIfExists(absolutePath) {
+  try {
+    if (absolutePath && fs.existsSync(absolutePath)) fs.unlinkSync(absolutePath);
+  } catch (err) {
+    console.warn(`[drafts] Failed to unlink ${absolutePath}: ${err.message}`);
+  }
+}
+
+function rmdirIfEmpty(absoluteDir) {
+  try {
+    if (absoluteDir && fs.existsSync(absoluteDir) && fs.readdirSync(absoluteDir).length === 0) {
+      fs.rmdirSync(absoluteDir);
+    }
+  } catch (err) {
+    console.warn(`[drafts] Failed to rmdir ${absoluteDir}: ${err.message}`);
+  }
 }
 
 // ── Carrier / business-phone DB functions ────────────────────────────────────
@@ -395,16 +436,141 @@ app.delete('/api/conversations/:customer', async (req, res, next) => {
   }
 });
 
-app.post('/api/conversations/:customer/send', upload.array('files', 10), async (req, res) => {
+// ── Draft media (pre-upload of attachments before send) ─────────────────────
+
+app.post('/api/drafts/:customer/media', upload.single('file'), async (req, res) => {
+  let tempPath = null;
+  let dir = null;
+  let filePath = null;
+  try {
+    const business = normalizeUs10(req.body?.businessNumber ?? req.query.businessNumber);
+    if (!business) return res.status(400).json({ error: 'businessNumber required' });
+    const customer = normalizeUs10(req.params.customer);
+    if (!customer) return res.status(400).json({ error: 'customer required' });
+    if (!req.file) return res.status(400).json({ error: 'file required' });
+
+    tempPath = req.file.path;
+    const uidDraftMediaId = uuidv4();
+    const originalName = req.file.originalname || 'attachment';
+    const origExt = path.extname(originalName).toLowerCase();
+    const base = path.basename(originalName, path.extname(originalName));
+
+    const buffer = fs.readFileSync(tempPath);
+    let contentType = await detectMimeType(buffer);
+    // Text-like formats (txt, csv, json, ics, vcf…) have no reliable magic
+    // bytes — fall back to the extension the user uploaded.
+    if (contentType === 'application/octet-stream') {
+      const byExt = mimeFromExtension(origExt);
+      if (byExt) contentType = byExt;
+    }
+    // Canonicalize the stored extension to match the detected MIME so
+    // Bandwidth's ext/content-type consistency check doesn't 415 us.
+    const canonicalExt = extensionForMime(contentType) || origExt || '.bin';
+    const displayName = `${base}-${uidDraftMediaId.slice(-4)}${canonicalExt}`;
+    if (canonicalExt !== origExt) {
+      console.log(`[drafts] Canonicalized extension ${origExt || '(none)'} -> ${canonicalExt} for detected type ${contentType}`);
+    }
+
+    const paths = buildDraftStoragePaths(business, customer, uidDraftMediaId, displayName);
+    dir = paths.dir;
+    filePath = paths.filePath;
+
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(filePath, buffer);
+    console.log(`[drafts] Saved draft file: ${filePath} (${buffer.length} bytes, ${contentType})`);
+
+    // Thumbnails aren't used for drafts — the composer renders the local file.
+    const thumbnailPath = null;
+
+    await insertDraftMedia({
+      uidDraftMediaId,
+      iBusinessNumber: business,
+      iCustomerNumber: customer,
+      displayName,
+      contentType,
+      iContentLength: buffer.length,
+      storagePath: relativeStoragePath(filePath),
+      thumbnailPath
+    });
+
+    fs.unlinkSync(tempPath);
+    tempPath = null;
+
+    return res.json({
+      draftMediaId: uidDraftMediaId,
+      displayName,
+      contentType,
+      contentLength: buffer.length,
+      storagePath: relativeStoragePath(filePath),
+      thumbnailPath
+    });
+  } catch (error) {
+    console.error('[drafts] Upload failed:', error.message);
+    if (tempPath) unlinkIfExists(tempPath);
+    if (filePath) unlinkIfExists(filePath);
+    if (dir) rmdirIfEmpty(dir);
+    return res.status(500).json({ error: 'Draft upload failed', details: error.message });
+  }
+});
+
+app.get('/api/drafts/:customer/media', async (req, res, next) => {
+  try {
+    const business = normalizeUs10(req.body?.businessNumber ?? req.query.businessNumber);
+    if (!business) return res.status(400).json({ error: 'businessNumber required' });
+    const customer = normalizeUs10(req.params.customer);
+    if (!customer) return res.status(400).json({ error: 'customer required' });
+    const rows = await getDraftMediaByCustomer(business, customer);
+    const items = rows.map(r => ({
+      draftMediaId: r.uidDraftMediaId,
+      displayName: r.displayName,
+      contentType: r.contentType,
+      contentLength: r.iContentLength,
+      storagePath: r.storagePath,
+      thumbnailPath: r.thumbnailPath
+    }));
+    res.json({ items });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete('/api/drafts/:customer/media/:draftMediaId', async (req, res, next) => {
+  try {
+    const business = normalizeUs10(req.body?.businessNumber ?? req.query.businessNumber);
+    if (!business) return res.status(400).json({ error: 'businessNumber required' });
+    const customer = normalizeUs10(req.params.customer);
+    const uidDraftMediaId = String(req.params.draftMediaId || '');
+
+    const row = await getDraftMedia(uidDraftMediaId);
+    if (!row) return res.json({ ok: true, deleted: false });
+    if (Number(row.iBusinessNumber) !== business || Number(row.iCustomerNumber) !== customer) {
+      return res.status(403).json({ error: 'Not yours' });
+    }
+
+    await deleteDraftMedia(uidDraftMediaId);
+
+    const filePath = path.join(MEDIA_ROOT, row.storagePath);
+    const thumbPath = row.thumbnailPath ? path.join(MEDIA_ROOT, row.thumbnailPath) : null;
+    unlinkIfExists(filePath);
+    if (thumbPath) unlinkIfExists(thumbPath);
+    rmdirIfEmpty(path.dirname(filePath));
+
+    return res.json({ ok: true, deleted: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/conversations/:customer/send', async (req, res) => {
   try {
     const business = normalizeUs10(req.body?.businessNumber ?? req.query.businessNumber);
     if (!business) return res.status(400).json({ error: 'businessNumber required' });
     const customer = normalizeUs10(req.params.customer);
     const text = String(req.body?.text ?? '').trim();
-    const files = req.files || [];
+    const draftMediaIds = Array.isArray(req.body?.draftMediaIds) ? req.body.draftMediaIds : [];
 
-    if (!customer || (!text && files.length === 0)) {
-      return res.status(400).json({ error: 'customer and text or files required' });
+    if (!customer || (!text && draftMediaIds.length === 0)) {
+      return res.status(400).json({ error: 'customer and text or draftMediaIds required' });
     }
 
     // ── Resolve carrier settings for this business phone ──────────────────
@@ -416,55 +582,42 @@ app.post('/api/conversations/:customer/send', upload.array('files', 10), async (
       console.warn(`[send] No DB carrier settings for ${business} — business phone not yet assigned to a CarrierApplication. Falling back to env vars.`);
     }
 
-    // ── Process outbound media uploads ─────────────────────────────────────
+    // ── Load draft media and upload each to Bandwidth ─────────────────────
     const bandwidthMediaUrls = [];
     const mediaRecords = []; // to insert after message is created
 
-    for (const file of files) {
-      try {
-        const uidMediaId = uuidv4();
-        const originalName = file.originalname || 'attachment';
-        // Append last 4 chars of UUID to prevent filename collisions
-        const ext = path.extname(originalName);
-        const base = path.basename(originalName, ext);
-        const displayName = `${base}-${uidMediaId.slice(-4)}${ext}`;
-
-        // Read the uploaded temp file
-        const buffer = fs.readFileSync(file.path);
-        const contentType = await detectMimeType(buffer);
-
-        // Build storage path and save to media volume
-        const { dir, filePath, thumbPath } = buildStoragePaths(business, customer, '_outbound', uidMediaId, displayName);
-        fs.mkdirSync(dir, { recursive: true });
-        fs.writeFileSync(filePath, buffer);
-        console.log(`[send] Saved outbound file: ${filePath} (${buffer.length} bytes, ${contentType})`);
-
-        // Generate thumbnail
-        const thumbGenerated = await generateThumbnail(filePath, thumbPath, contentType);
-        const thumbnailPath = thumbGenerated ? relativeStoragePath(thumbPath) : null;
-
-        // Upload to Bandwidth
-        const bandwidthMediaName = `echo-${uidMediaId}-${displayName}`;
-        const bandwidthUrl = await uploadMedia(bandwidthMediaName, buffer, contentType, carrierSettings);
-        bandwidthMediaUrls.push(bandwidthUrl);
-
-        // Queue media record for DB insert after message is created
-        mediaRecords.push({
-          uidMediaId,
-          providerId: bandwidthUrl,
-          iContentLength: buffer.length,
-          displayName,
-          contentType,
-          storagePath: relativeStoragePath(filePath),
-          thumbnailPath
-        });
-
-        // Clean up multer temp file
-        fs.unlinkSync(file.path);
-      } catch (fileErr) {
-        console.error(`[send] Failed to process file ${file.originalname}:`, fileErr.message);
-        if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+    for (const draftId of draftMediaIds) {
+      const draft = await getDraftMedia(String(draftId));
+      if (!draft) {
+        console.warn(`[send] Draft media ${draftId} not found — skipping`);
+        continue;
       }
+      if (Number(draft.iBusinessNumber) !== business || Number(draft.iCustomerNumber) !== customer) {
+        console.warn(`[send] Draft media ${draftId} does not belong to ${business}/${customer} — skipping`);
+        continue;
+      }
+
+      const draftFilePath = path.join(MEDIA_ROOT, draft.storagePath);
+      if (!fs.existsSync(draftFilePath)) {
+        console.warn(`[send] Draft file missing on disk: ${draftFilePath} — skipping`);
+        continue;
+      }
+      const buffer = fs.readFileSync(draftFilePath);
+
+      const bandwidthMediaName = `echo-${draft.uidDraftMediaId}-${draft.displayName}`;
+      const bandwidthUrl = await uploadMedia(bandwidthMediaName, buffer, draft.contentType, carrierSettings);
+      bandwidthMediaUrls.push(bandwidthUrl);
+
+      mediaRecords.push({
+        uidMediaId: draft.uidDraftMediaId, // reuse the UUID; draft rows are deleted after send
+        providerId: bandwidthUrl,
+        iContentLength: Number(draft.iContentLength) || buffer.length,
+        displayName: draft.displayName,
+        contentType: draft.contentType,
+        draftStoragePath: draft.storagePath,
+        draftThumbnailPath: draft.thumbnailPath,
+        draftFilePath
+      });
     }
 
     // ── Send via Bandwidth ────────────────────────────────────────────────
@@ -490,29 +643,39 @@ app.post('/api/conversations/:customer/send', upload.array('files', 10), async (
         eMessageEventTypeID: 2
       });
 
-      // Insert media records linked to the message
       for (const rec of mediaRecords) {
         try {
+          // Move the draft file into the permanent per-message layout.
+          const { dir, filePath, thumbPath } = buildStoragePaths(business, customer, iMessageId, rec.uidMediaId, rec.displayName);
+          fs.mkdirSync(dir, { recursive: true });
+          fs.renameSync(rec.draftFilePath, filePath);
+
+          // Generate a thumbnail for images (not drafts — only once the
+          // attachment is promoted to a sent message, for thread rendering).
+          let thumbnailPath = null;
+          const thumbGenerated = await generateThumbnail(filePath, thumbPath, rec.contentType);
+          if (thumbGenerated) thumbnailPath = relativeStoragePath(thumbPath);
+
           await insertMedia({
             uidMediaId: rec.uidMediaId,
             iMessageId,
             providerId: rec.providerId,
             iContentLength: rec.iContentLength
           });
-          // Immediately mark as obtained since we already have the file
           await dbPool.query('CALL sms_usp_Media_SET(?, ?, ?, ?, ?)', [
-            rec.uidMediaId, true, rec.storagePath, rec.contentType, rec.thumbnailPath
+            rec.uidMediaId, true, relativeStoragePath(filePath), rec.contentType, thumbnailPath
           ]);
+
+          await deleteDraftMedia(rec.uidMediaId);
+          rmdirIfEmpty(path.dirname(rec.draftFilePath));
         } catch (mediaErr) {
-          console.error(`[send] Failed to insert media record ${rec.uidMediaId}:`, mediaErr.message);
+          console.error(`[send] Failed to finalize media record ${rec.uidMediaId}:`, mediaErr.message);
         }
       }
     }
 
     return res.json({ ok: true, provider: data });
   } catch (error) {
-    // Clean up any remaining temp files
-    if (req.files) req.files.forEach(f => { if (fs.existsSync(f.path)) fs.unlinkSync(f.path); });
     const details = error?.response?.data ?? error?.message;
     return res.status(200).json({ ok: false, error: 'Provider send failed', details });
   }

@@ -12,31 +12,151 @@ const { downloadMedia } = require('./bandwidth-media');
 
 const MEDIA_ROOT = process.env.MEDIA_ROOT || '/media';
 
-// ─── MIME detection via magic bytes (file-type is ESM-only) ──────────────────
+// ─── MIME detection via magic bytes ──────────────────────────────────────────
+// Inline header-signature detection for the file types Bandwidth MMS accepts
+// plus a few common office/document types. No external dependency.
 
-/** @returns {Promise<import('file-type')>} */
-async function loadFileType() {
-  return await import('file-type');
+function eq(buffer, offset, bytes) {
+  if (buffer.length < offset + bytes.length) return false;
+  for (let i = 0; i < bytes.length; i++) {
+    if (buffer[offset + i] !== bytes[i]) return false;
+  }
+  return true;
+}
+
+function asciiAt(buffer, offset, s) {
+  return eq(buffer, offset, Buffer.from(s, 'ascii'));
+}
+
+// Map an ISO BMFF "ftyp" major brand (4 ASCII chars at offset 8) to a MIME type.
+function ftypBrandToMime(brand) {
+  const b = brand.toLowerCase();
+  if (b.startsWith('qt  ') || b === 'qt  ') return 'video/quicktime';
+  if (b.startsWith('3gp') || b.startsWith('3g2')) return 'video/3gpp';
+  if (b === 'heic' || b === 'heix' || b === 'hevc' || b === 'hevx' || b === 'mif1' || b === 'msf1' || b === 'heim' || b === 'heis') return 'image/heic';
+  if (b === 'avif' || b === 'avis') return 'image/avif';
+  if (b === 'm4a ' || b === 'm4b ' || b === 'f4a ' || b === 'f4b ') return 'audio/mp4';
+  // isom / mp41 / mp42 / iso2 / avc1 / dash / mmp4 / etc. → generic mp4 video
+  return 'video/mp4';
 }
 
 /**
- * Detect MIME type from a buffer using magic byte inspection.
+ * Detect MIME type from a buffer using magic-byte inspection.
  * Falls back to 'application/octet-stream' if detection fails.
  * @param {Buffer} buffer
  * @returns {Promise<string>}
  */
 async function detectMimeType(buffer) {
-  try {
-    const { fileTypeFromBuffer } = await loadFileType();
-    const result = await fileTypeFromBuffer(buffer);
-    if (result?.mime) {
-      console.log(`[mediaObtain] Magic byte detected: ${result.mime}`);
-      return result.mime;
-    }
-  } catch (err) {
-    console.warn('[mediaObtain] file-type detection error:', err.message);
+  if (!buffer || buffer.length < 4) return 'application/octet-stream';
+
+  // JPEG
+  if (eq(buffer, 0, [0xFF, 0xD8, 0xFF])) return 'image/jpeg';
+
+  // PNG
+  if (eq(buffer, 0, [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])) return 'image/png';
+
+  // GIF87a / GIF89a
+  if (asciiAt(buffer, 0, 'GIF87a') || asciiAt(buffer, 0, 'GIF89a')) return 'image/gif';
+
+  // BMP
+  if (asciiAt(buffer, 0, 'BM')) return 'image/bmp';
+
+  // RIFF-based (WEBP / WAV / AVI)
+  if (asciiAt(buffer, 0, 'RIFF') && buffer.length >= 12) {
+    if (asciiAt(buffer, 8, 'WEBP')) return 'image/webp';
+    if (asciiAt(buffer, 8, 'WAVE')) return 'audio/wav';
+    if (asciiAt(buffer, 8, 'AVI ')) return 'video/x-msvideo';
   }
+
+  // ISO BMFF: ftyp at offset 4
+  if (asciiAt(buffer, 4, 'ftyp') && buffer.length >= 12) {
+    const brand = buffer.slice(8, 12).toString('ascii');
+    return ftypBrandToMime(brand);
+  }
+
+  // PDF
+  if (asciiAt(buffer, 0, '%PDF')) return 'application/pdf';
+
+  // ZIP-based (plain zip, docx, xlsx, pptx)
+  if (eq(buffer, 0, [0x50, 0x4B, 0x03, 0x04]) || eq(buffer, 0, [0x50, 0x4B, 0x05, 0x06]) || eq(buffer, 0, [0x50, 0x4B, 0x07, 0x08])) {
+    return 'application/zip';
+  }
+
+  // MP3: ID3v2 tag or raw MPEG audio frame
+  if (asciiAt(buffer, 0, 'ID3')) return 'audio/mpeg';
+  if (buffer[0] === 0xFF && (buffer[1] & 0xE0) === 0xE0) {
+    // MPEG audio frame sync — MP3 (layer III) or other MPEG audio
+    return 'audio/mpeg';
+  }
+
+  // Ogg
+  if (asciiAt(buffer, 0, 'OggS')) return 'audio/ogg';
+
+  // AMR
+  if (asciiAt(buffer, 0, '#!AMR\n')) return 'audio/amr';
+
+  // WebM / Matroska (EBML header)
+  if (eq(buffer, 0, [0x1A, 0x45, 0xDF, 0xA3])) return 'video/webm';
+
+  // MPEG-PS / MPEG-TS quick hints
+  if (eq(buffer, 0, [0x00, 0x00, 0x01, 0xBA]) || eq(buffer, 0, [0x00, 0x00, 0x01, 0xB3])) return 'video/mpeg';
+
   return 'application/octet-stream';
+}
+
+// ─── Extension-based fallbacks (for formats with no magic bytes) ─────────────
+
+// Canonical extension for a MIME type. Used to rewrite display_name so
+// Bandwidth's extension/content-type consistency check passes.
+const MIME_TO_EXT = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/gif': '.gif',
+  'image/bmp': '.bmp',
+  'image/webp': '.webp',
+  'image/heic': '.heic',
+  'image/avif': '.avif',
+  'video/mp4': '.mp4',
+  'video/quicktime': '.mov',
+  'video/3gpp': '.3gp',
+  'video/webm': '.webm',
+  'video/mpeg': '.mpeg',
+  'video/x-msvideo': '.avi',
+  'audio/mpeg': '.mp3',
+  'audio/mp4': '.m4a',
+  'audio/wav': '.wav',
+  'audio/ogg': '.ogg',
+  'audio/amr': '.amr',
+  'application/pdf': '.pdf',
+  'application/zip': '.zip',
+  'text/plain': '.txt',
+  'text/csv': '.csv',
+  'text/calendar': '.ics',
+  'text/vcard': '.vcf',
+  'application/json': '.json',
+  'application/xml': '.xml'
+};
+
+function extensionForMime(mime) {
+  return MIME_TO_EXT[(mime || '').toLowerCase()] || null;
+}
+
+// Text-like formats with no reliable magic bytes — fall back to extension.
+const EXT_TO_MIME_TEXT = {
+  '.txt': 'text/plain',
+  '.log': 'text/plain',
+  '.md': 'text/plain',
+  '.csv': 'text/csv',
+  '.tsv': 'text/tab-separated-values',
+  '.ics': 'text/calendar',
+  '.vcf': 'text/vcard',
+  '.json': 'application/json',
+  '.xml': 'application/xml'
+};
+
+function mimeFromExtension(extension) {
+  const ext = String(extension || '').toLowerCase();
+  return EXT_TO_MIME_TEXT[ext] || null;
 }
 
 // ─── Thumbnail generation ────────────────────────────────────────────────────
@@ -130,6 +250,25 @@ function buildStoragePaths(businessPhone, customerPhone, messageId, uidMediaId, 
     String(customerPhone),
     String(messageId),
     uidMediaId
+  );
+  const filePath = path.join(dir, displayName);
+  const thumbName = `thumbnail-${path.parse(displayName).name}.jpg`;
+  const thumbPath = path.join(dir, thumbName);
+  return { dir, filePath, thumbPath };
+}
+
+/**
+ * Build the storage directory and file paths for a draft media item
+ * (attachment picked but not yet sent).
+ * Pattern: /_drafts/{businessPhone}/{customerPhone}/{uidDraftMediaId}/
+ */
+function buildDraftStoragePaths(businessPhone, customerPhone, uidDraftMediaId, displayName) {
+  const dir = path.join(
+    MEDIA_ROOT,
+    '_drafts',
+    String(businessPhone),
+    String(customerPhone),
+    uidDraftMediaId
   );
   const filePath = path.join(dir, displayName);
   const thumbName = `thumbnail-${path.parse(displayName).name}.jpg`;
@@ -260,4 +399,4 @@ async function obtainPendingMedia(dbPool, messageId = null) {
   return counts;
 }
 
-module.exports = { obtainPendingMedia, detectMimeType, generateThumbnail, buildStoragePaths, relativeStoragePath, MEDIA_ROOT };
+module.exports = { obtainPendingMedia, detectMimeType, extensionForMime, mimeFromExtension, generateThumbnail, buildStoragePaths, buildDraftStoragePaths, relativeStoragePath, MEDIA_ROOT };
