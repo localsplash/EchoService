@@ -138,20 +138,28 @@ async function listConversations(iBusinessNumber) {
 }
 
 async function getConversationMessages(iBusinessNumber, iCustomerNumber) {
+  // The carrier's reason for a failed send lives on the message-failed event
+  // row; join it in so the UI can show why a message did not go out. The unique
+  // (iMessageId, eMessageEventTypeID) index means this matches at most one row.
   const [rows] = await dbPool.query(
     `SELECT
-        iMessageId,
-        sMessageId,
-        bInbound,
-        iBusinessNumber,
-        iCustomerNumber,
-        text,
-        dtCreated,
-        eMessageEventTypeID,
-        bIsRead
-      FROM sms_tbl_Message
-      WHERE iBusinessNumber = ? AND iCustomerNumber = ?
-      ORDER BY dtCreated ASC, iMessageId ASC`,
+        m.iMessageId,
+        m.sMessageId,
+        m.bInbound,
+        m.iBusinessNumber,
+        m.iCustomerNumber,
+        m.text,
+        m.dtCreated,
+        m.eMessageEventTypeID,
+        m.bIsRead,
+        f.iErrorCode,
+        f.description AS errorDescription
+      FROM sms_tbl_Message m
+      LEFT JOIN sms_tbl_MessageEvent f
+        ON f.iMessageId = m.iMessageId
+       AND f.eMessageEventTypeID = 8
+      WHERE m.iBusinessNumber = ? AND m.iCustomerNumber = ?
+      ORDER BY m.dtCreated ASC, m.iMessageId ASC`,
     [iBusinessNumber, iCustomerNumber]
   );
   return rows || [];
