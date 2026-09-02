@@ -5,7 +5,7 @@
  *
  * Every application on the platform reads the same table: the base
  * `IdentityBase` (one base per repository, named `{Repo}Base`), table
- * `auth_tbl_Settings`. See localsplash/identify#15 for the standard; the
+ * `auth_tbl_Settings`. See localsplash/identity#15 for the standard; the
  * rules that matter here are:
  *
  *   - the base is found by NAME at runtime. A base name is unique because we

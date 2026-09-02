@@ -33,7 +33,7 @@ const port = process.env.PORT || 8080;
  *
  * The environment states two things — NOCODB_BASE_URL and NOCODB_API_TOKEN —
  * and everything else is a row in `auth_tbl_Settings` inside `IdentityBase`
- * (see #2 and localsplash/identify#15). Nothing below carries an invented
+ * (see #2 and localsplash/identity#15). Nothing below carries an invented
  * fallback: an `echo-database` that looks configured and is wrong is worse
  * than a value that is plainly missing.
  */

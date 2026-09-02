@@ -20,7 +20,7 @@ const { settings: platformSettings } = require('./settings');
  * Bandwidth's own API base, and the account credentials, come from the
  * platform settings (IdentityBase.auth_tbl_Settings) rather than the
  * environment — with the per-carrier row from sms_tbl_CarrierApplication
- * still winning when one is passed in. See localsplash/identify#15.
+ * still winning when one is passed in. See localsplash/identity#15.
  */
 function bandwidthBase() {
   return (

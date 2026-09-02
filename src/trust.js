@@ -5,7 +5,7 @@
  *
  * `trustedCIDR` is one value for the whole platform — a row in
  * IdentityBase.auth_tbl_Settings that every application reads, rather than a
- * differently-named CIDR per service (see localsplash/identify#15). It
+ * differently-named CIDR per service (see localsplash/identity#15). It
  * describes a network: every first-party server inside it is trusted, and
  * nothing outside it is.
  *
