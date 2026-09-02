@@ -9,6 +9,15 @@ const fs = require('fs');
 const path = require('path');
 const { uploadMedia } = require('./bandwidth-media');
 const { obtainPendingMedia, detectMimeType, extensionForMime, mimeFromExtension, buildStoragePaths, buildDraftStoragePaths, relativeStoragePath, generateThumbnail, MEDIA_ROOT } = require('./mediaObtain');
+const {
+  settings,
+  refreshSettings,
+  ensureFreshSettings,
+  SettingsUnavailableError,
+  SETTINGS_BASE_NAME,
+  SETTINGS_TABLE_NAME
+} = require('./settings');
+const { peerInTrustedNetwork } = require('./trust');
 
 // Multer: store uploads in temp dir, max 3.5 MB per file, max 10 files
 const upload = multer({
@@ -18,23 +27,63 @@ const upload = multer({
 
 const app = express();
 const port = process.env.PORT || 8080;
-const explicitOrigins = (process.env.CORS_ORIGINS || '')
-  .split(',')
-  .map((s) => s.trim())
-  .filter(Boolean);
-const webhookUser = process.env.WEBHOOK_BASIC_USER || '';
-const webhookPass = process.env.WEBHOOK_BASIC_PASS || '';
 
-const dbPool = mysql.createPool({
-  host: process.env.DB_HOST || 'echo-database',
-  port: Number(process.env.DB_PORT || 3306),
-  user: process.env.DB_USER || 'echo_app',
-  password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME || 'echo_db',
-  waitForConnections: true,
-  connectionLimit: 10,
-  timezone: 'Z'
-});
+/**
+ * Configuration comes from the settings table, not from `.env`.
+ *
+ * The environment states two things — NOCODB_BASE_URL and NOCODB_API_TOKEN —
+ * and everything else is a row in `auth_tbl_Settings` inside `IdentityBase`
+ * (see #2 and localsplash/identify#15). Nothing below carries an invented
+ * fallback: an `echo-database` that looks configured and is wrong is worse
+ * than a value that is plainly missing.
+ */
+function explicitOrigins() {
+  return (settings().CORS_ORIGINS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/**
+ * The identity database, connected on first use.
+ *
+ * Its coordinates are settings, so they are not known when this module is
+ * loaded — only once the store has been read. Every call site keeps using
+ * `dbPool.query(...)` unchanged; the pool underneath is created the first
+ * time one of them runs. A change of coordinates takes a restart, because
+ * silently reconnecting a live service to a different database mid-request
+ * is worse than an explicit bounce.
+ */
+let realPool = null;
+function poolCoordinates() {
+  const s = settings();
+  const host = (s.DB_HOST || '').trim();
+  const user = (s.DB_USER || '').trim();
+  const database = (s.DB_NAME || '').trim();
+  if (!host || !user || !database) {
+    throw new Error(
+      'DB_HOST, DB_USER and DB_NAME must be set in IdentityBase.auth_tbl_Settings'
+    );
+  }
+  const parsed = Number.parseInt((s.DB_PORT || '').trim(), 10);
+  return {
+    host,
+    // MySQL's own registered port — the protocol's default, not a guess.
+    port: Number.isFinite(parsed) && parsed > 0 ? parsed : 3306,
+    user,
+    password: s.DB_PASSWORD || '',
+    database,
+    waitForConnections: true,
+    connectionLimit: 10,
+    timezone: 'Z'
+  };
+}
+const dbPool = {
+  async query(...args) {
+    if (!realPool) realPool = mysql.createPool(poolCoordinates());
+    return realPool.query(...args);
+  }
+};
 
 function isAllowedOrigin(origin) {
   if (!origin) return true;
@@ -47,7 +96,7 @@ function isAllowedOrigin(origin) {
     if (isLocal) return true;
     if (isWisp) return true;
     if (isDevUi) return true;
-    if (explicitOrigins.includes(origin)) return true;
+    if (explicitOrigins().includes(origin)) return true;
     return false;
   } catch {
     return false;
@@ -55,6 +104,14 @@ function isAllowedOrigin(origin) {
 }
 
 function requireWebhookBasicAuth(req, res, next) {
+  // A caller from inside the platform's own network is already trusted —
+  // that is what trustedCIDR names, one value shared by every application.
+  // Bandwidth reaches us from outside it, so basic auth stays the path for
+  // the provider's own webhooks.
+  if (peerInTrustedNetwork(req, settings().trustedCIDR)) return next();
+
+  const webhookUser = settings().WEBHOOK_BASIC_USER || '';
+  const webhookPass = settings().WEBHOOK_BASIC_PASS || '';
   if (!webhookUser && !webhookPass) return next();
   const header = req.headers.authorization || '';
   if (!header.startsWith('Basic ')) {
@@ -293,12 +350,13 @@ function mask(val) {
   return val.slice(0, 4) + '***' + val.slice(-2);
 }
 
-async function sendBandwidthMessage({ from, to, text, media, settings }) {
-  const base = process.env.BANDWIDTH_MESSAGING_API_BASE_URL || 'https://messaging.bandwidth.com/api/v2';
-  const accountId     = settings?.accountId     ?? process.env.BANDWIDTH_ACCOUNT_ID;
-  const apiToken      = settings?.apiToken      ?? process.env.BANDWIDTH_API_TOKEN;
-  const apiSecret     = settings?.apiSecret     ?? process.env.BANDWIDTH_API_SECRET;
-  const applicationId = settings?.applicationId ?? process.env.BANDWIDTH_APPLICATION_ID;
+async function sendBandwidthMessage({ from, to, text, media, settings: bwSettings }) {
+  const base =
+    settings().BANDWIDTH_MESSAGING_API_BASE_URL || 'https://messaging.bandwidth.com/api/v2';
+  const accountId     = bwSettings?.accountId     ?? settings().BANDWIDTH_ACCOUNT_ID;
+  const apiToken      = bwSettings?.apiToken      ?? settings().BANDWIDTH_API_TOKEN;
+  const apiSecret     = bwSettings?.apiSecret     ?? settings().BANDWIDTH_API_SECRET;
+  const applicationId = bwSettings?.applicationId ?? settings().BANDWIDTH_APPLICATION_ID;
 
   const source = settings ? 'DB' : 'env';
   console.log(`[send] Bandwidth credentials source: ${source}`);
@@ -347,6 +405,26 @@ async function sendBandwidthMessage({ from, to, text, media, settings }) {
 app.use(helmet());
 app.use(express.json({ limit: '1mb' }));
 app.use(morgan('combined'));
+
+// Settings-free, so it answers while the store is down: "the process is up"
+// stays distinguishable from "the process cannot read its settings".
+app.get('/ping', (_req, res) => {
+  res.json({ message: 'pong', service: 'EchoService' });
+});
+
+/**
+ * Keep the settings fresh before anything reads them.
+ *
+ * The store caches for 30 seconds, so this is a comparison on the hot path
+ * and a NocoDB read at most twice a minute — and a change made in NocoDB
+ * reaches this service within that window, with no restart. A failure is not
+ * swallowed: it travels to the error handler, which answers 503 naming which
+ * of unreachable / missing / ambiguous it was.
+ */
+app.use((_req, _res, next) => {
+  ensureFreshSettings().then(() => next(), next);
+});
+
 app.use(cors({
   origin: (origin, cb) => {
     if (isAllowedOrigin(origin)) return cb(null, true);
@@ -361,10 +439,6 @@ app.get('/health', async (_req, res) => {
   } catch (error) {
     res.status(500).json({ ok: false, service: 'EchoService', db: false, error: error.message });
   }
-});
-
-app.get('/ping', (_req, res) => {
-  res.json({ message: 'pong', service: 'EchoService' });
 });
 
 app.get('/api/conversations', async (req, res, next) => {
@@ -919,9 +993,57 @@ app.post('/webhooks/bandwidth/status', requireWebhookBasicAuth, async (req, res)
 
 app.use((err, _req, res, _next) => {
   console.error(err);
+  // A settings store that cannot answer is a configuration fault, and saying
+  // so beats a 500 that reads as an application fault.
+  if (err instanceof SettingsUnavailableError) {
+    return res
+      .status(503)
+      .json({ error: err.message, reason: err.reason, base: SETTINGS_BASE_NAME });
+  }
   res.status(500).json({ error: 'Internal server error' });
 });
 
-app.listen(port, '0.0.0.0', () => {
-  console.log(`EchoService listening on :${port}`);
+const RETRY_DELAY_MS = 5000;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Find the settings or die.
+ *
+ * Every value this service needs — its database, its Bandwidth credentials,
+ * the trusted network — is a row in IdentityBase.auth_tbl_Settings. There is
+ * no fallback: starting without them would mean answering every request with
+ * a fault we could not explain. One retry covers the ordinary case of NocoDB
+ * still coming up beside us; after that, exit saying why.
+ */
+async function main() {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await refreshSettings();
+      console.log(`[settings] ${SETTINGS_BASE_NAME}.${SETTINGS_TABLE_NAME} read`);
+      break;
+    } catch (err) {
+      const message = err && err.message ? err.message : String(err);
+      if (attempt === 1) {
+        console.warn(`[settings] ${message} — retrying once in ${RETRY_DELAY_MS / 1000}s`);
+        await sleep(RETRY_DELAY_MS);
+        continue;
+      }
+      console.error(`[settings] ${message}`);
+      console.error(
+        `[settings] Cannot start without the ${SETTINGS_BASE_NAME} base at ` +
+          `${process.env.NOCODB_BASE_URL || '(NOCODB_BASE_URL unset)'}. Fix the URL or the ` +
+          'token, or create the base (its name must be unique), then start again.'
+      );
+      process.exit(1);
+    }
+  }
+
+  app.listen(port, '0.0.0.0', () => {
+    console.log(`EchoService listening on :${port}`);
+  });
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
 });
