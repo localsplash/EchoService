@@ -7,17 +7,31 @@
  * settings: parsed jsonSettings from sms_tbl_CarrierApplication
  *   { accountId, apiToken, apiSecret, applicationId }
  *
- * Falls back to BANDWIDTH_* env vars when settings are not provided
+ * Falls back to the BANDWIDTH_* rows in auth_tbl_Settings when no carrier
+ * settings are provided
  * (backward-compat during migration before all business phones are in DB).
  *
  * Reference: https://dev.bandwidth.com/docs/messaging/media/
  */
 
-const BANDWIDTH_BASE = process.env.BANDWIDTH_MESSAGING_API_BASE_URL || 'https://messaging.bandwidth.com/api/v2';
+const { settings: platformSettings } = require('./settings');
+
+/**
+ * Bandwidth's own API base, and the account credentials, come from the
+ * platform settings (IdentityBase.auth_tbl_Settings) rather than the
+ * environment — with the per-carrier row from sms_tbl_CarrierApplication
+ * still winning when one is passed in. See localsplash/identify#15.
+ */
+function bandwidthBase() {
+  return (
+    platformSettings().BANDWIDTH_MESSAGING_API_BASE_URL ||
+    'https://messaging.bandwidth.com/api/v2'
+  );
+}
 
 function basicAuthHeader(settings) {
-  const token  = settings?.apiToken  ?? process.env.BANDWIDTH_API_TOKEN  ?? '';
-  const secret = settings?.apiSecret ?? process.env.BANDWIDTH_API_SECRET ?? '';
+  const token  = settings?.apiToken  ?? platformSettings().BANDWIDTH_API_TOKEN  ?? '';
+  const secret = settings?.apiSecret ?? platformSettings().BANDWIDTH_API_SECRET ?? '';
   return 'Basic ' + Buffer.from(`${token}:${secret}`).toString('base64');
 }
 
@@ -58,8 +72,8 @@ async function downloadMedia(providerUrl, settings) {
  * @returns {Promise<string>} The public Bandwidth media URL to include in message.media[]
  */
 async function uploadMedia(mediaName, buffer, contentType, settings) {
-  const accountId = settings?.accountId ?? process.env.BANDWIDTH_ACCOUNT_ID ?? '';
-  const url = `${BANDWIDTH_BASE}/users/${accountId}/media/${encodeURIComponent(mediaName)}`;
+  const accountId = settings?.accountId ?? platformSettings().BANDWIDTH_ACCOUNT_ID ?? '';
+  const url = `${bandwidthBase()}/users/${accountId}/media/${encodeURIComponent(mediaName)}`;
   console.log(`[bandwidth-media] Uploading ${buffer.length} bytes as "${mediaName}" to ${url}`);
 
   const response = await fetch(url, {
@@ -77,7 +91,7 @@ async function uploadMedia(mediaName, buffer, contentType, settings) {
     throw new Error(`Bandwidth upload failed (${response.status}): ${text}`);
   }
 
-  const mediaUrl = `${BANDWIDTH_BASE}/users/${accountId}/media/${encodeURIComponent(mediaName)}`;
+  const mediaUrl = `${bandwidthBase()}/users/${accountId}/media/${encodeURIComponent(mediaName)}`;
   console.log(`[bandwidth-media] Uploaded successfully: ${mediaUrl}`);
   return mediaUrl;
 }

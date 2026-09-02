@@ -1,15 +1,21 @@
 # Standalone dev — for full stack use EchoOrchestrator instead.
+#
+# EchoService reads everything it needs from the NocoDB base IdentityBase
+# (table auth_tbl_Settings). The only things stated here are how to reach it.
 services:
   echo-service:
     build: .
     container_name: echo-service
     environment:
       PORT: "8080"
-      DB_HOST: ${DB_HOST:-host.docker.internal}
-      DB_USER: ${DB_USER:-echo_app}
-      DB_PASSWORD: ${DB_PASSWORD:-devpass}
-      DB_NAME: ${DB_NAME:-echo_db}
-      CORS_ORIGINS: "*"
+      NOCODB_BASE_URL: ${NOCODB_BASE_URL:-http://host.docker.internal:18090}
+      NOCODB_API_TOKEN: ${NOCODB_API_TOKEN:-}
+      # Optional overrides of auth_tbl_Settings rows; blank counts as unset.
+      IDENTITY_TRUSTED_NETWORK: ${IDENTITY_TRUSTED_NETWORK:-}
+      DB_HOST: ${DB_HOST:-}
+      DB_USER: ${DB_USER:-}
+      DB_PASSWORD: ${DB_PASSWORD:-}
+      DB_NAME: ${DB_NAME:-}
     ports:
       - "127.0.0.1:18080:8080"
     volumes:
