@@ -17,6 +17,13 @@ const {
   IDENTITY_BASE_NAME
 } = require('./settings');
 const { peerInTrustedNetwork } = require('./trust');
+const { applyLocalConfig, isBootstrapped, LOCAL_CONFIG_PATH } = require('./localConfig');
+const { mountSetup } = require('./setup');
+
+// Before anything reads NOCODB_*: fold in /data/config.json, without
+// overriding what the environment already states. On a single-host install
+// this file is identity's, mounted read-only, and the wizard never runs.
+applyLocalConfig();
 
 // Multer: store uploads in temp dir, max 3.5 MB per file, max 10 files
 const upload = multer({
@@ -392,6 +399,10 @@ async function sendBandwidthMessage({ from, to, text, media, settings: bwSetting
 app.use(helmet());
 app.use(express.json({ limit: '1mb' }));
 app.use(morgan('combined'));
+
+// The first-run wizard, before the settings gate below — it is the thing that
+// answers the question that gate is failing on, so it cannot sit behind it.
+mountSetup(app);
 
 // Settings-free, so it answers while the store is down: "the process is up"
 // stays distinguishable from "the process cannot read its settings".
@@ -1001,6 +1012,23 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * still coming up beside us; after that, exit saying why.
  */
 async function main() {
+  // Nowhere to read trustedCIDR from yet. Exiting here would be the old
+  // behaviour and a dead end — nothing an operator does short of editing the
+  // environment could recover it, and on a fresh host there is nothing to
+  // edit. So come up serving the wizard instead, and let it restart us onto a
+  // real configuration. Everything else stays refused by the settings gate.
+  if (!isBootstrapped()) {
+    console.warn(
+      '[settings] No NOCODB_BASE_URL / NOCODB_API_TOKEN, and no bootstrap file at ' +
+        `${LOCAL_CONFIG_PATH}. Starting in setup mode: open /setup from the ` +
+        'deployment network to say where the settings store is.'
+    );
+    app.listen(port, '0.0.0.0', () => {
+      console.log(`EchoService listening on :${port} (setup mode)`);
+    });
+    return;
+  }
+
   for (let attempt = 1; ; attempt++) {
     try {
       await refreshSettings(dbPool);
