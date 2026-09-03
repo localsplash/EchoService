@@ -14,7 +14,9 @@ services:
       DB_USER: ${DB_USER:-echo_app}
       DB_PASSWORD: ${DB_PASSWORD:-devpass}
       DB_NAME: ${DB_NAME:-echo_db}
-      NOCODB_BASE_URL: ${NOCODB_BASE_URL:-http://host.docker.internal:18090}
+      # Optional. Blank means: look in /data/config.json, and failing that
+      # start in setup mode and ask at /setup.
+      NOCODB_BASE_URL: ${NOCODB_BASE_URL:-}
       NOCODB_API_TOKEN: ${NOCODB_API_TOKEN:-}
       # Pin the trusted network instead of reading it from NocoDB.
       IDENTITY_TRUSTED_NETWORK: ${IDENTITY_TRUSTED_NETWORK:-}
@@ -22,7 +24,12 @@ services:
       - "127.0.0.1:18080:8080"
     volumes:
       - echo_media_data:/media
+      # The bootstrap file the wizard writes, so answering it once survives a
+      # rebuild. On a single-host install mount identity's volume here :ro
+      # instead — see EchoOrchestrator.
+      - echo_service_config:/data
     restart: unless-stopped
 
 volumes:
   echo_media_data:
+  echo_service_config:
