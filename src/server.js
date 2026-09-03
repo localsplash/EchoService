@@ -14,8 +14,7 @@ const {
   refreshSettings,
   ensureFreshSettings,
   SettingsUnavailableError,
-  SETTINGS_BASE_NAME,
-  SETTINGS_TABLE_NAME
+  IDENTITY_BASE_NAME
 } = require('./settings');
 const { peerInTrustedNetwork } = require('./trust');
 
@@ -29,13 +28,11 @@ const app = express();
 const port = process.env.PORT || 8080;
 
 /**
- * Configuration comes from the settings table, not from `.env`.
- *
- * The environment states two things — NOCODB_BASE_URL and NOCODB_API_TOKEN —
- * and everything else is a row in `auth_tbl_Settings` inside `IdentityBase`
- * (see #2 and localsplash/identity#15). Nothing below carries an invented
- * fallback: an `echo-database` that looks configured and is wrong is worse
- * than a value that is plainly missing.
+ * Configuration comes from echo_tbl_Settings in the Echo database — rows
+ * where sApp is '*' (every Echo app) or 'service' (this one). The one value
+ * read from outside that database is trustedCIDR, which is platform-wide
+ * network policy and lives in the IdentityBase NocoDB base. See
+ * EchoDatabase init/009_settings.sql.
  */
 function explicitOrigins() {
   return (settings().CORS_ORIGINS || '')
@@ -45,45 +42,35 @@ function explicitOrigins() {
 }
 
 /**
- * The identity database, connected on first use.
+ * The Echo database.
  *
- * Its coordinates are settings, so they are not known when this module is
- * loaded — only once the store has been read. Every call site keeps using
- * `dbPool.query(...)` unchanged; the pool underneath is created the first
- * time one of them runs. A change of coordinates takes a restart, because
- * silently reconnecting a live service to a different database mid-request
- * is worse than an explicit bounce.
+ * Its coordinates come from the environment, because this is where the
+ * settings themselves live — a database cannot carry its own address.
+ * Everything else about this service is a row in echo_tbl_Settings. No
+ * invented defaults: a wrong host that looks configured is worse than one
+ * that is plainly missing.
  */
-let realPool = null;
 function poolCoordinates() {
-  const s = settings();
-  const host = (s.DB_HOST || '').trim();
-  const user = (s.DB_USER || '').trim();
-  const database = (s.DB_NAME || '').trim();
+  const host = (process.env.DB_HOST || '').trim();
+  const user = (process.env.DB_USER || '').trim();
+  const database = (process.env.DB_NAME || '').trim();
   if (!host || !user || !database) {
-    throw new Error(
-      'DB_HOST, DB_USER and DB_NAME must be set in IdentityBase.auth_tbl_Settings'
-    );
+    throw new Error('DB_HOST, DB_USER and DB_NAME must be set — they say where the Echo database is');
   }
-  const parsed = Number.parseInt((s.DB_PORT || '').trim(), 10);
+  const parsed = Number.parseInt((process.env.DB_PORT || '').trim(), 10);
   return {
     host,
     // MySQL's own registered port — the protocol's default, not a guess.
     port: Number.isFinite(parsed) && parsed > 0 ? parsed : 3306,
     user,
-    password: s.DB_PASSWORD || '',
+    password: process.env.DB_PASSWORD || '',
     database,
     waitForConnections: true,
     connectionLimit: 10,
     timezone: 'Z'
   };
 }
-const dbPool = {
-  async query(...args) {
-    if (!realPool) realPool = mysql.createPool(poolCoordinates());
-    return realPool.query(...args);
-  }
-};
+const dbPool = mysql.createPool(poolCoordinates());
 
 function isAllowedOrigin(origin) {
   if (!origin) return true;
@@ -422,7 +409,7 @@ app.get('/ping', (_req, res) => {
  * of unreachable / missing / ambiguous it was.
  */
 app.use((_req, _res, next) => {
-  ensureFreshSettings().then(() => next(), next);
+  ensureFreshSettings(dbPool).then(() => next(), next);
 });
 
 app.use(cors({
@@ -996,9 +983,7 @@ app.use((err, _req, res, _next) => {
   // A settings store that cannot answer is a configuration fault, and saying
   // so beats a 500 that reads as an application fault.
   if (err instanceof SettingsUnavailableError) {
-    return res
-      .status(503)
-      .json({ error: err.message, reason: err.reason, base: SETTINGS_BASE_NAME });
+    return res.status(503).json({ error: err.message, reason: err.reason });
   }
   res.status(500).json({ error: 'Internal server error' });
 });
@@ -1018,8 +1003,8 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function main() {
   for (let attempt = 1; ; attempt++) {
     try {
-      await refreshSettings();
-      console.log(`[settings] ${SETTINGS_BASE_NAME}.${SETTINGS_TABLE_NAME} read`);
+      await refreshSettings(dbPool);
+      console.log('[settings] echo_tbl_Settings read');
       break;
     } catch (err) {
       const message = err && err.message ? err.message : String(err);
@@ -1030,9 +1015,9 @@ async function main() {
       }
       console.error(`[settings] ${message}`);
       console.error(
-        `[settings] Cannot start without the ${SETTINGS_BASE_NAME} base at ` +
-          `${process.env.NOCODB_BASE_URL || '(NOCODB_BASE_URL unset)'}. Fix the URL or the ` +
-          'token, or create the base (its name must be unique), then start again.'
+        '[settings] Cannot start. Check DB_HOST/DB_USER/DB_NAME for the Echo database, ' +
+          'that echo_tbl_Settings exists in it, and NOCODB_BASE_URL/NOCODB_API_TOKEN for ' +
+          `the ${IDENTITY_BASE_NAME} base that carries trustedCIDR.`
       );
       process.exit(1);
     }
