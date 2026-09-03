@@ -7,7 +7,7 @@
  * settings: parsed jsonSettings from sms_tbl_CarrierApplication
  *   { accountId, apiToken, apiSecret, applicationId }
  *
- * Falls back to the BANDWIDTH_* rows in auth_tbl_Settings when no carrier
+ * Falls back to the BANDWIDTH_* rows in echo_tbl_Settings when no carrier
  * settings are provided
  * (backward-compat during migration before all business phones are in DB).
  *
@@ -17,10 +17,10 @@
 const { settings: platformSettings } = require('./settings');
 
 /**
- * Bandwidth's own API base, and the account credentials, come from the
- * platform settings (IdentityBase.auth_tbl_Settings) rather than the
- * environment — with the per-carrier row from sms_tbl_CarrierApplication
- * still winning when one is passed in. See localsplash/identity#15.
+ * Bandwidth's own API base, and the account credentials, come from
+ * echo_tbl_Settings in the Echo database rather than the environment — with
+ * the per-carrier row from sms_tbl_CarrierApplication still winning when one
+ * is passed in.
  */
 function bandwidthBase() {
   return (

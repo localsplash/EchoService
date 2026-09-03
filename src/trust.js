@@ -4,10 +4,11 @@
  * Is the caller inside the platform's own network?
  *
  * `trustedCIDR` is one value for the whole platform — a row in
- * IdentityBase.auth_tbl_Settings that every application reads, rather than a
- * differently-named CIDR per service (see localsplash/identity#15). It
- * describes a network: every first-party server inside it is trusted, and
- * nothing outside it is.
+ * IdentityBase.auth_tbl_Settings that identity and every application read,
+ * rather than a differently-named CIDR per service. It is the one setting
+ * this service reads from outside the Echo database, because a network
+ * policy only works if everyone agrees on it. It describes a network: every
+ * first-party server inside it is trusted, and nothing outside it is.
  *
  * Only the TCP socket peer counts. X-Forwarded-For is not consulted here: a
  * header any client can write is not evidence of where a request came from,
