@@ -8,6 +8,7 @@ const {
   isBootstrapped,
 } = require('./localConfig');
 const { parseCidrList, ipv4ToNumber } = require('./trust');
+const { sendOperatorPage } = require('./operatorPage');
 
 /**
  * The first-run wizard: where the settings store is, and nothing else.
@@ -209,9 +210,7 @@ document.getElementById('f').addEventListener('submit', async (e) => {
 
 /** Mount the wizard. Safe to call unconditionally; it gates itself. */
 function mountSetup(app) {
-  app.get('/setup', requireLocalPeer, (_req, res) => {
-    res.set('Content-Type', 'text/html; charset=utf-8').send(PAGE);
-  });
+  app.get('/setup', requireLocalPeer, (_req, res) => sendOperatorPage(res, PAGE));
 
   app.get('/api/setup/status', requireLocalPeer, (_req, res) => {
     res.json({

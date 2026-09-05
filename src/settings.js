@@ -190,10 +190,36 @@ async function readTrustedCidr() {
 
 // ─── The snapshot every call site reads ──────────────────────────────────────
 
-/** Read both sources and replace the snapshot. Throws if either fails. */
+/**
+ * Read both sources and replace the snapshot.
+ *
+ * A failure to read the Echo database is fatal to the refresh: those rows are
+ * this service's own configuration and running on the previous ones would be
+ * running on a guess.
+ *
+ * `trustedCIDR` is never fatal here, which is a change of stance. It used to
+ * throw, which meant NocoDB being briefly unreachable answered every request
+ * with a 503 and — at startup — exited the process, so the one screen able to
+ * explain the problem could never be drawn. It is now reported rather than
+ * raised, in two ways:
+ *
+ *   - A failed *re-read* keeps the last known value and records why it is
+ *     stale. This value is platform-wide policy that changes about never, and
+ *     a blip in a second system should not make the policy less available than
+ *     the service it protects.
+ *   - A failure with nothing cached yields `''`, which every check in
+ *     `trust.js` treats as "trust nobody". That is fail-closed, and
+ *     `networkPolicy` turns it into a screen naming the cause with a retry.
+ */
 async function refreshSettings(pool) {
   const settings = { ...(await readEchoSettings(pool)), ...overridesFromEnv() };
-  settings.trustedCIDR = await readTrustedCidr();
+  const previous = cache && cache.settings ? cache.settings.trustedCIDR : undefined;
+  try {
+    settings.trustedCIDR = await readTrustedCidr();
+  } catch (err) {
+    settings.trustedCIDR = previous === undefined ? '' : previous;
+    settings.trustedCIDRError = err && err.message ? err.message : String(err);
+  }
   cache = { at: Date.now(), settings };
   return settings;
 }
@@ -234,6 +260,7 @@ module.exports = {
   SETTING_KEYS,
   SettingsUnavailableError,
   readEchoSettings,
+  readTrustedCidr,
   refreshSettings,
   ensureFreshSettings,
   settings,

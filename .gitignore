@@ -1,0 +1,15 @@
+node_modules/
+npm-debug.log*
+
+# Real credentials. .env.example is the one that is committed — this repo had
+# no .gitignore, and a NOCODB_API_TOKEN was sitting untracked in the working
+# tree one `git add -A` away from being published.
+.env
+.env.*
+!.env.example
+
+# Written at runtime, not by hand: the bootstrap file the setup wizard saves
+# and the rotating logs behind /logs.
+data/
+logs/
+*.log
