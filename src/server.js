@@ -4,7 +4,7 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const mysql = require('mysql2/promise');
 const multer = require('multer');
-const { v4: uuidv4 } = require('uuid');
+const { v4: uuidv4, v5: uuidv5 } = require('uuid');
 const fs = require('fs');
 const path = require('path');
 const { uploadMedia } = require('./bandwidth-media');
@@ -16,6 +16,14 @@ const {
   SettingsUnavailableError,
   IDENTITY_BASE_NAME
 } = require('./settings');
+const {
+  sendTychronMessage,
+  extractMmsParts,
+  mapSmsStatus,
+  mapMmsStatus,
+  parseTychronErrorCode,
+  tychronStatusDescription
+} = require('./tychron');
 const { peerInTrustedNetwork } = require('./trust');
 const { applyLocalConfig, isBootstrapped, LOCAL_CONFIG_PATH } = require('./localConfig');
 const { mountSetup } = require('./setup');
@@ -298,6 +306,9 @@ function rmdirIfEmpty(absoluteDir) {
 
 // ── Carrier / business-phone DB functions ────────────────────────────────────
 
+/** sms_lkp_Carrier.eCarrierId for Tychron. */
+const CARRIER_TYCHRON = 8;
+
 async function getBusinessPhoneSettings(iBusinessNumber) {
   const [rows] = await dbPool.query('CALL sms_usp_BusinessPhone_GET(?)', [iBusinessNumber]);
   const row = rows?.[0]?.[0];
@@ -334,6 +345,35 @@ async function setCarrierApplication(iCarrierApplicationId, name, eCarrierId, js
 async function getCarriers() {
   const [rows] = await dbPool.query('SELECT eCarrierId, carrier, description FROM sms_lkp_Carrier ORDER BY eCarrierId');
   return rows || [];
+}
+
+// ── Tychron multipart SMS parts ──────────────────────────────────────────────
+//
+// Tychron's send response returns the multipart id, but each segment's
+// delivery report references that segment's own part id. We store one
+// sMessageId per message, so without this mapping every report for a message
+// longer than a single segment — most of them — would find nothing to update.
+//
+// Both tolerate the procedures being absent so this service can ship before
+// EchoDatabase 010_tychron.sql is applied; the cost is only that multipart
+// reports keep being missed until it is.
+
+async function insertTychronMessagePart(iMessageId, sMultipartId, sPartId) {
+  try {
+    await dbPool.query('CALL sms_usp_TychronMessagePart_INS(?, ?, ?)', [iMessageId, sMultipartId, sPartId]);
+  } catch (error) {
+    console.warn(`[tychron] Could not record part ${sPartId} (is EchoDatabase 010_tychron.sql applied?): ${error.message}`);
+  }
+}
+
+async function resolveTychronPartMessageId(sPartId) {
+  try {
+    const [rows] = await dbPool.query('CALL sms_usp_TychronMessagePart_GET(?)', [sPartId]);
+    return rows?.[0]?.[0]?.sMessageId ?? null;
+  } catch (error) {
+    console.warn(`[tychron] Part lookup failed for ${sPartId} (is EchoDatabase 010_tychron.sql applied?): ${error.message}`);
+    return null;
+  }
 }
 
 // ── Bandwidth message send ───────────────────────────────────────────────────
@@ -396,8 +436,130 @@ async function sendBandwidthMessage({ from, to, text, media, settings: bwSetting
   return data;
 }
 
+// ── Tychron message send ─────────────────────────────────────────────────────
+
+/**
+ * A fixed namespace so an inbound Tychron media id is a pure function of the
+ * message and the part index. Tychron treats any non-2xx as a temporary
+ * failure and redelivers, so the same MMS arrives more than once as a matter
+ * of course; a v4 id would write a second copy of every attachment, where a
+ * v5 id collides on the primary key and is skipped.
+ */
+const TYCHRON_MEDIA_NAMESPACE = '4b8f2c1e-6d3a-5f47-9c2b-1e7a8d4f0b93';
+
+/**
+ * Tychron has no media store to upload to and hand back a URL, so there is
+ * nothing to put in sms_tbl_Media.providerId. This keeps the column
+ * meaningful — and, because sms_usp_Media_INS derives displayName from the
+ * tail of the provider id, it also produces the right filename without
+ * touching a procedure the Bandwidth path shares.
+ */
+function tychronProviderId(sMessageId, index, displayName) {
+  return `tychron:${sMessageId}/${index}/${displayName}`;
+}
+
+/**
+ * The Tychron send path.
+ *
+ * Kept separate from the Bandwidth flow in the route below rather than shared
+ * with it: Bandwidth uploads each attachment and sends URLs, Tychron sends
+ * the bytes inline, and the only step the two have in common is reading the
+ * draft file off disk.
+ */
+async function sendViaTychron({ res, business, customer, text, draftMediaIds, settings: tychronSettings }) {
+  // Read the drafts as buffers. No provider upload step — the bytes go in
+  // the send request itself.
+  const attachments = [];
+
+  for (const draftId of draftMediaIds) {
+    const draft = await getDraftMedia(String(draftId));
+    if (!draft) {
+      console.warn(`[send:tychron] Draft media ${draftId} not found — skipping`);
+      continue;
+    }
+    if (Number(draft.iBusinessNumber) !== business || Number(draft.iCustomerNumber) !== customer) {
+      console.warn(`[send:tychron] Draft media ${draftId} does not belong to ${business}/${customer} — skipping`);
+      continue;
+    }
+    const draftFilePath = path.join(MEDIA_ROOT, draft.storagePath);
+    if (!fs.existsSync(draftFilePath)) {
+      console.warn(`[send:tychron] Draft file missing on disk: ${draftFilePath} — skipping`);
+      continue;
+    }
+    attachments.push({
+      uidMediaId: draft.uidDraftMediaId,
+      buffer: fs.readFileSync(draftFilePath),
+      contentType: draft.contentType,
+      displayName: draft.displayName,
+      iContentLength: Number(draft.iContentLength) || 0,
+      draftFilePath
+    });
+  }
+
+  const sent = await sendTychronMessage({
+    from: toE164Us10(business),
+    to: toE164Us10(customer),
+    text: text || '',
+    attachments,
+    settings: tychronSettings
+  });
+
+  const sMessageId = sent?.id;
+  if (!sMessageId) return res.json({ ok: true, provider: sent.raw });
+
+  const iMessageId = await insertMessage({
+    sMessageId,
+    bInbound: false,
+    iBusinessNumber: business,
+    iCustomerNumber: customer,
+    text: text || '',
+    dtCreated: toMysqlDateTime3(),
+    eMessageEventTypeID: 2
+  });
+
+  for (const sPartId of sent.parts || []) {
+    await insertTychronMessagePart(iMessageId, sMessageId, sPartId);
+  }
+
+  if (iMessageId) {
+    for (let index = 0; index < attachments.length; index++) {
+      const attachment = attachments[index];
+      try {
+        // Move the draft file into the permanent per-message layout.
+        const { dir, filePath, thumbPath } = buildStoragePaths(business, customer, iMessageId, attachment.uidMediaId, attachment.displayName);
+        fs.mkdirSync(dir, { recursive: true });
+        fs.renameSync(attachment.draftFilePath, filePath);
+
+        let thumbnailPath = null;
+        const thumbGenerated = await generateThumbnail(filePath, thumbPath, attachment.contentType);
+        if (thumbGenerated) thumbnailPath = relativeStoragePath(thumbPath);
+
+        await insertMedia({
+          uidMediaId: attachment.uidMediaId,
+          iMessageId,
+          providerId: tychronProviderId(sMessageId, index, attachment.displayName),
+          iContentLength: attachment.iContentLength || attachment.buffer.length
+        });
+        await dbPool.query('CALL sms_usp_Media_SET(?, ?, ?, ?, ?)', [
+          attachment.uidMediaId, true, relativeStoragePath(filePath), attachment.contentType, thumbnailPath
+        ]);
+
+        await deleteDraftMedia(attachment.uidMediaId);
+        rmdirIfEmpty(path.dirname(attachment.draftFilePath));
+      } catch (mediaErr) {
+        console.error(`[send:tychron] Failed to finalize media record ${attachment.uidMediaId}:`, mediaErr.message);
+      }
+    }
+  }
+
+  return res.json({ ok: true, provider: sent.raw });
+}
+
 app.use(helmet());
-app.use(express.json({ limit: '1mb' }));
+// 1 MB was enough while every inbound attachment was a Bandwidth URL to
+// fetch later. Tychron delivers MMS media inline as base64 in the webhook
+// body, so the limit now has to cover the message itself.
+app.use(express.json({ limit: '10mb' }));
 app.use(morgan('combined'));
 
 // The first-run wizard, before the settings gate below — it is the thing that
@@ -660,6 +822,16 @@ app.post('/api/conversations/:customer/send', async (req, res) => {
       console.log(`[send] Resolved DB carrier settings for ${business}: app="${phoneRecord.carrierApplicationName}" carrier="${phoneRecord.carrier}"`);
     } else {
       console.warn(`[send] No DB carrier settings for ${business} — business phone not yet assigned to a CarrierApplication. Falling back to env vars.`);
+    }
+
+    // ── Tychron takes a different path from here ──────────────────────────
+    // Everything below this block is the Bandwidth flow, unchanged. A
+    // provider that needs its attachments uploaded first and one that needs
+    // them inline do not share a useful middle.
+    if (Number(phoneRecord?.eCarrierId) === CARRIER_TYCHRON) {
+      return await sendViaTychron({
+        res, business, customer, text, draftMediaIds, settings: carrierSettings
+      });
     }
 
     // ── Load draft media and upload each to Bandwidth ─────────────────────
@@ -949,6 +1121,161 @@ async function processBandwidthEvents(events) {
   return { ok: true, stored, duplicates, invalid, lostEvents, errors };
 }
 
+// ── Tychron webhook processing ──────────────────────────────────────────────
+//
+// Separate from processBandwidthEvents rather than folded into it. Tychron
+// posts one object where Bandwidth posts an array, splits inbound messages
+// and delivery reports across two payload families told apart by a
+// discriminator field, and carries inbound media as bytes rather than as a
+// URL to fetch later. Only the handful of values that have to reach the
+// existing tables are normalized.
+
+function isDuplicateKeyError(error) {
+  return Boolean(
+    error &&
+      (error.code === 'ER_DUP_ENTRY' || String(error.message || '').toLowerCase().includes('duplicate'))
+  );
+}
+
+/** Inbound SMS and SMS delivery reports, told apart by `type`. */
+async function processTychronSmsWebhook(payload) {
+  const type = payload?.type;
+
+  if (type === 'sms') {
+    if (!payload.id) return { ok: false, error: 'inbound sms has no id' };
+    await insertMessage({
+      sMessageId: payload.id,
+      bInbound: true,
+      iBusinessNumber: normalizeUs10(payload.to),
+      iCustomerNumber: normalizeUs10(payload.from),
+      text: payload.body ?? null,
+      dtCreated: toMysqlDateTime3(payload.inserted_at ?? payload.processed_at),
+      eMessageEventTypeID: 1
+    });
+    console.log(`[webhook:tychron:sms] stored inbound ${payload.id}`);
+    return { ok: true, stored: 1 };
+  }
+
+  if (type === 'sms_dlr') {
+    const eMessageEventTypeID = mapSmsStatus(payload.delivery_status);
+    if (!eMessageEventTypeID) {
+      console.log(`[webhook:tychron:sms] ignoring in-flight status "${payload.delivery_status}"`);
+      return { ok: true, ignored: 1 };
+    }
+
+    const referencedId = payload.sms?.id;
+    if (!referencedId) return { ok: false, error: 'sms_dlr references no sms id' };
+
+    const event = {
+      eMessageEventTypeID,
+      dtEvent: toMysqlDateTime3(payload.done_at ?? payload.updated_at ?? payload.inserted_at),
+      iErrorCode: parseTychronErrorCode(payload.delivery_error_code),
+      description: tychronStatusDescription(payload.delivery_status, payload.delivery_error_code)
+    };
+
+    // The report references a *segment*. For a single-segment message that is
+    // the id we stored; for a longer one it is a part id, and the mapping
+    // recorded at send time is what leads back to the message.
+    let updated = await setMessageEventByExternalMessageId({ sMessageId: referencedId, ...event });
+    if (!updated) {
+      const parentMessageId = await resolveTychronPartMessageId(referencedId);
+      if (parentMessageId) {
+        updated = await setMessageEventByExternalMessageId({ sMessageId: parentMessageId, ...event });
+      }
+    }
+
+    if (!updated) console.warn(`[webhook:tychron:sms] no message matches ${referencedId}`);
+    return { ok: true, updated: updated ? 1 : 0, lostEvents: updated ? 0 : 1 };
+  }
+
+  return { ok: false, error: `unknown sms payload type "${type}"` };
+}
+
+/** Inbound MMS and MMS delivery reports, told apart by `kind`. */
+async function processTychronMmsWebhook(payload) {
+  const kind = payload?.kind;
+
+  if (kind === 'mms_forward_req') {
+    if (!payload.id) return { ok: false, error: 'inbound mms has no id' };
+
+    const iBusinessNumber = normalizeUs10(Array.isArray(payload.to) ? payload.to[0] : payload.to);
+    const iCustomerNumber = normalizeUs10(payload.from);
+    const { text, attachments } = extractMmsParts(payload.data);
+
+    const iMessageId = await insertMessage({
+      sMessageId: payload.id,
+      bInbound: true,
+      iBusinessNumber,
+      iCustomerNumber,
+      text: text || null,
+      dtCreated: toMysqlDateTime3(payload.inserted_at ?? payload.timestamp),
+      eMessageEventTypeID: 1
+    });
+    if (!iMessageId) return { ok: false, error: 'message insert returned no id' };
+
+    // The bytes are already here, so there is nothing for obtainPendingMedia
+    // to fetch: the row is written already obtained.
+    let stored = 0;
+    for (let index = 0; index < attachments.length; index++) {
+      const attachment = attachments[index];
+      const uidMediaId = uuidv5(`${payload.id}/${index}`, TYCHRON_MEDIA_NAMESPACE);
+      try {
+        const { dir, filePath, thumbPath } = buildStoragePaths(iBusinessNumber, iCustomerNumber, iMessageId, uidMediaId, attachment.displayName);
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(filePath, attachment.buffer);
+
+        let thumbnailPath = null;
+        const thumbGenerated = await generateThumbnail(filePath, thumbPath, attachment.contentType);
+        if (thumbGenerated) thumbnailPath = relativeStoragePath(thumbPath);
+
+        await insertMedia({
+          uidMediaId,
+          iMessageId,
+          providerId: tychronProviderId(payload.id, index, attachment.displayName),
+          iContentLength: attachment.buffer.length
+        });
+        await dbPool.query('CALL sms_usp_Media_SET(?, ?, ?, ?, ?)', [
+          uidMediaId, true, relativeStoragePath(filePath), attachment.contentType, thumbnailPath
+        ]);
+        stored += 1;
+      } catch (mediaErr) {
+        if (isDuplicateKeyError(mediaErr)) {
+          console.log(`[webhook:tychron:mms] media ${uidMediaId} already stored — redelivery, skipping`);
+          continue;
+        }
+        throw mediaErr; // real fault: let the route answer 5xx so Tychron retries
+      }
+    }
+
+    console.log(`[webhook:tychron:mms] stored inbound ${payload.id} with ${stored}/${attachments.length} attachment(s)`);
+    return { ok: true, stored: 1, media: stored };
+  }
+
+  if (kind === 'mms_delivery_report_req') {
+    const eMessageEventTypeID = mapMmsStatus(payload.status_code);
+    if (!eMessageEventTypeID) {
+      console.log(`[webhook:tychron:mms] ignoring in-flight status "${payload.status_code}"`);
+      return { ok: true, ignored: 1 };
+    }
+
+    const referencedId = payload.mms?.id;
+    if (!referencedId) return { ok: false, error: 'mms report references no mms id' };
+
+    const updated = await setMessageEventByExternalMessageId({
+      sMessageId: referencedId,
+      eMessageEventTypeID,
+      dtEvent: toMysqlDateTime3(payload.timestamp ?? payload.inserted_at),
+      iErrorCode: null,
+      description: tychronStatusDescription(payload.status_code, null)
+    });
+
+    if (!updated) console.warn(`[webhook:tychron:mms] no message matches ${referencedId}`);
+    return { ok: true, updated: updated ? 1 : 0, lostEvents: updated ? 0 : 1 };
+  }
+
+  return { ok: false, error: `unknown mms payload kind "${kind}"` };
+}
+
 // ── Media obtain trigger endpoints ──────────────────────────────────────────
 
 app.post('/api/media/obtain', async (_req, res, next) => {
@@ -987,6 +1314,45 @@ app.post('/webhooks/bandwidth/status', requireWebhookBasicAuth, async (req, res)
     return res.status(400).json({ ok: false, error: 'Payload must be an array' });
   }
   return res.json(await processBandwidthEvents(req.body));
+});
+
+// ── Tychron webhooks ────────────────────────────────────────────────────────
+//
+// Two rules shape these handlers, and both differ from Bandwidth's:
+//
+//   1. On the SMS endpoint a 200 *with a body* is a reply — Tychron turns the
+//      body into an SMS back to the sender. Answering the way the Bandwidth
+//      routes do would text every inbound sender our event counters. Only 204
+//      acknowledges silently.
+//   2. Any non-2xx is a temporary failure and the message is redelivered. So a
+//      payload we are never going to accept still has to be acknowledged, or
+//      it is retried forever; and a transient fault must *not* be, so that it
+//      comes back once the fault clears.
+
+app.post('/webhooks/tychron/sms', requireWebhookBasicAuth, async (req, res) => {
+  try {
+    const result = await processTychronSmsWebhook(req.body);
+    if (!result.ok) {
+      console.warn(`[webhook:tychron:sms] ${result.error} — acknowledging, a retry would not help`);
+    }
+  } catch (error) {
+    console.error('[webhook:tychron:sms] processing failed', error);
+    return res.sendStatus(503); // transient — ask Tychron to redeliver
+  }
+  return res.sendStatus(204); // never a body: a body would be sent to the customer
+});
+
+app.post('/webhooks/tychron/mms', requireWebhookBasicAuth, async (req, res) => {
+  try {
+    const result = await processTychronMmsWebhook(req.body);
+    if (!result.ok) {
+      console.warn(`[webhook:tychron:mms] ${result.error} — acknowledging, a retry would not help`);
+    }
+  } catch (error) {
+    console.error('[webhook:tychron:mms] processing failed', error);
+    return res.sendStatus(503); // transient — ask Tychron to redeliver
+  }
+  return res.sendStatus(204);
 });
 
 app.use((err, _req, res, _next) => {
