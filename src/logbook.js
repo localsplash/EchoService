@@ -30,7 +30,15 @@
 const fs = require('fs');
 const path = require('path');
 
-const LOG_DIR = (process.env.LOG_DIR || '/data/logs').trim();
+/**
+ * Not `/data`. That path is identity's config volume, and on a single-host
+ * install it is mounted here read-only — the arrangement the Dockerfile
+ * describes and the first thing this tried to write to. `/var/log/echo` is
+ * created and owned in the image, so the files work with no compose change at
+ * all; the orchestrator mounts a named volume over it so they outlive the
+ * container rather than living in its writable layer.
+ */
+const LOG_DIR = (process.env.LOG_DIR || '/var/log/echo').trim();
 
 function positiveInt(raw, fallback) {
   const parsed = Number.parseInt(String(raw || '').trim(), 10);
@@ -261,13 +269,26 @@ function install() {
   });
 
   ensureOpen();
-  record('info', `[logbook] capturing to ${LOG_DIR} (ring ${RING_SIZE} lines)`);
-  if (fileFault) record('warn', `[logbook] files unavailable — ${fileFault}`);
+  // console, not record: where the log is going belongs on stdout too, and a
+  // line about logging that only appears in the log is no use when the log is
+  // the thing that is not working.
+  console.log(`[logbook] capturing to ${LOG_DIR} (ring ${RING_SIZE} lines)`);
+  if (fileFault) {
+    console.warn(`[logbook] files unavailable, keeping the in-memory ring only — ${fileFault}`);
+  }
 }
 
-/** The morgan sink, so access lines land here as a level of their own. */
+/**
+ * The morgan sink, so access lines land here as a level of their own.
+ *
+ * It writes to stdout as well, because morgan's default sink *is* stdout and
+ * replacing it silently took the access log out of `docker logs` and away from
+ * the host's promtail. This layer is only ever additive; anything already
+ * watching the container keeps seeing what it saw.
+ */
 const morganStream = {
   write(line) {
+    process.stdout.write(line);
     record('access', line);
   },
 };

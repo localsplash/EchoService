@@ -16,10 +16,14 @@ COPY src ./src
 #
 # /data is created and owned so the standalone case works too: with no shared
 # volume the first-run wizard writes the file here itself.
+# /var/log/echo is where the rotating logs behind /logs go. It is created here
+# rather than left to a volume so the viewer works on a bare `docker run` — /data
+# is identity's config volume and is mounted read-only on a single-host install,
+# which is why the logs cannot live there.
 RUN addgroup -S -g 101 app \
  && adduser -S -u 100 -G app app \
- && mkdir -p /media/_tmp /data \
- && chown -R app:app /app /media /data
+ && mkdir -p /media/_tmp /data /var/log/echo \
+ && chown -R app:app /app /media /data /var/log/echo
 USER app
 
 EXPOSE 8080

@@ -28,8 +28,13 @@ services:
       # rebuild. On a single-host install mount identity's volume here :ro
       # instead — see EchoOrchestrator.
       - echo_service_config:/data
+      # The rotating logs behind /logs. Its own volume because /data is
+      # read-only in the single-host arrangement, and because a log that does
+      # not survive `up --build` is not much of a log.
+      - echo_service_logs:/var/log/echo
     restart: unless-stopped
 
 volumes:
   echo_media_data:
   echo_service_config:
+  echo_service_logs:
