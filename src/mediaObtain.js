@@ -10,6 +10,9 @@ const sharp = require('sharp');
 const ffmpeg = require('fluent-ffmpeg');
 const { downloadMedia } = require('./bandwidth-media');
 
+// A mount point, not a setting: read once here, and every storagePath on disk
+// is relative to it. Under docker compose the volume decides it, and this
+// default matches. See .env.example.
 const MEDIA_ROOT = process.env.MEDIA_ROOT || '/media';
 
 // ─── MIME detection via magic bytes ──────────────────────────────────────────

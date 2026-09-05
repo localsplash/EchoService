@@ -17,15 +17,40 @@ docker compose up -d --build
 
 ## Endpoints
 
-- `GET /health`
-- `GET /api/ping`
-- `POST /api/echo`
+- `GET /ping`, `GET /health` — liveness; both answer in setup mode
+- `GET|POST|DELETE /api/conversations/...` — threads, messages, read state
+- `GET|POST|DELETE /api/drafts/:customer/media` — draft attachments
+- `POST /api/conversations/:customer/send` — outbound SMS/MMS
+- `GET|POST|PUT /api/carriers`, `/api/carrier-applications`, `/api/business-phones`
+- `POST /api/media/obtain[/:messageId]` — fetch provider-hosted media
+- `POST /webhooks/bandwidth/{inbound,status}`, `/webhooks/tychron/{sms,mms}`
+- `GET /setup`, `GET /api/setup/status`, `POST /api/setup/bootstrap` — first run
+
+## Required environment
+
+| Variable | Why it is here |
+| --- | --- |
+| `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME` | Where `echo_tbl_Settings` lives — a database cannot carry its own address |
+
+`PORT` (8080) and `MEDIA_ROOT` (`/media`) have defaults; `NOCODB_BASE_URL` /
+`NOCODB_API_TOKEN`, `IDENTITY_TRUSTED_NETWORK`, `SETUP_ALLOW_FROM` and
+`ECHO_CONFIG_DIR` are optional and described in `.env.example`. There is no
+dotenv here: `npm start` reads the process environment, and `.env` is what
+Docker Compose substitutes into `docker-compose.yml`.
 
 ## Configuration
 
 Settings come from `echo_tbl_Settings` in the Echo database — rows where `sApp`
 is `'*'` (every Echo app) or `'service'` (this one). The `.env` states only how
 to reach that database.
+
+Any of those keys may also be pinned in the environment, where it **overrides**
+the row (blank counts as unset) — see `.env.example` for the list. A stale
+override wins over a correct row, so pin only what you mean to override.
+
+`MEDIA_ROOT` is not one of them. It is a mount point, read once at startup, and
+every stored path on disk is relative to it — so it is an environment variable
+and the volume mount decides it, not a settings row.
 
 One value is read from outside it: **`trustedCIDR`**, the platform-wide network
 policy held in the NocoDB base `IdentityBase`. This service uses it to decide
