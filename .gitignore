@@ -1,4 +1,14 @@
 node_modules
+npm-debug.log*
+
+# Real credentials. .env.example is the one that is committed.
 .env
 .env.*
 *.env.bak
+!.env.example
+
+# Written at runtime, not by hand: the bootstrap file the setup wizard saves
+# and the rotating logs behind /logs.
+data/
+logs/
+*.log

@@ -1,3 +1,7 @@
+// First, before any other module can log a line: capture console output to the
+// ring and the files behind /logs. Nothing is diverted — stdout is unchanged.
+require('./logbook').install();
+
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -24,9 +28,20 @@ const {
   parseTychronErrorCode,
   tychronStatusDescription
 } = require('./tychron');
-const { peerInTrustedNetwork } = require('./trust');
+const { clientInTrustedNetwork } = require('./trust');
 const { applyLocalConfig, isBootstrapped, LOCAL_CONFIG_PATH } = require('./localConfig');
 const { mountSetup } = require('./setup');
+const logbook = require('./logbook');
+const webhookWatch = require('./webhookWatch');
+const {
+  loadPolicy,
+  policyState,
+  requireTrustedNetwork,
+  mountPolicy,
+  trustedProxies,
+  callerAddress
+} = require('./networkPolicy');
+const { mountLogs } = require('./logsPage');
 
 // Before anything reads NOCODB_*: fold in /data/config.json, without
 // overriding what the environment already states. On a single-host install
@@ -129,7 +144,16 @@ function requireWebhookBasicAuth(req, res, next) {
   // that is what trustedCIDR names, one value shared by every application.
   // Bandwidth reaches us from outside it, so basic auth stays the path for
   // the provider's own webhooks.
-  if (peerInTrustedNetwork(req, settings().trustedCIDR)) return next();
+  //
+  // This has to resolve the client through the proxy rather than trusting the
+  // socket peer, and the difference was not academic: behind Nginx Proxy
+  // Manager every request arrives from the proxy's own address on the Docker
+  // network, which falls inside the 172.16.0.0/12 entry of trustedCIDR. The
+  // peer check therefore passed for *every* caller and this basic auth was not
+  // enforced at all — `curl -X POST https://<host>/webhooks/tychron/sms` with
+  // no credentials answered 204 and could write fabricated inbound messages
+  // straight into the database. See trust.js `clientIp`.
+  if (clientInTrustedNetwork(req, settings().trustedCIDR, trustedProxies())) return next();
 
   const webhookUser = settings().WEBHOOK_BASIC_USER || '';
   const webhookPass = settings().WEBHOOK_BASIC_PASS || '';
@@ -579,7 +603,9 @@ app.use(helmet());
 // fetch later. Tychron delivers MMS media inline as base64 in the webhook
 // body, so the limit now has to cover the message itself.
 app.use(express.json({ limit: '10mb' }));
-app.use(morgan('combined'));
+// Access lines go to the log viewer as a level of their own, and to stdout
+// exactly as before.
+app.use(morgan('combined', { stream: logbook.morganStream }));
 
 // The first-run wizard, before the settings gate below — it is the thing that
 // answers the question that gate is failing on, so it cannot sit behind it.
@@ -590,6 +616,40 @@ mountSetup(app);
 app.get('/ping', (_req, res) => {
   res.json({ message: 'pong', service: 'EchoService' });
 });
+
+// Reading and reloading the network policy, mounted above the gate that policy
+// drives: when it has failed to load, this is the only way back, and it does
+// its own access check for exactly that reason.
+mountPolicy(app);
+
+/**
+ * Routes that answer from outside the trusted network, and why each one must.
+ *
+ *   - `/webhooks/` — Tychron and Bandwidth call from their own networks. Behind
+ *     the gate the inbound message path would close permanently. They keep
+ *     basic auth, and webhookWatch records every call including the refused
+ *     ones, so a carrier going quiet stays visible.
+ *   - `/ping` — the container HEALTHCHECK, and the one thing that should still
+ *     answer when nothing else can. It reveals nothing.
+ *   - `/setup`, `/api/setup/` — the first-run wizard, which cannot sit behind a
+ *     policy it has not been told where to find. It gates itself to the
+ *     deployment network.
+ *   - `/api/policy` — the way out of a failed load, gated in the same way.
+ *
+ * Everything else — the whole `/api` surface and the log viewer — is now
+ * refused unless the caller is inside trustedCIDR. Before this, all of it was
+ * readable by anyone who knew the hostname.
+ */
+const OPEN_TO_ANY_NETWORK = [/^\/webhooks\//, /^\/ping$/, /^\/setup$/, /^\/api\/setup\//, /^\/api\/policy/];
+
+app.use((req, res, next) => {
+  if (OPEN_TO_ANY_NETWORK.some((pattern) => pattern.test(req.path))) return next();
+  return requireTrustedNetwork(req, res, next);
+});
+
+// Above the settings gate on purpose: the log viewer is most wanted when the
+// settings store is the thing that is broken, so it must not depend on it.
+mountLogs(app, { echoDb, policyState, callerAddress });
 
 /**
  * Keep the settings fresh before anything reads them.
@@ -1321,14 +1381,22 @@ app.post('/api/media/obtain/:messageId', async (req, res, next) => {
 
 // ── Webhooks ────────────────────────────────────────────────────────────────
 
-app.post('/webhooks/bandwidth/inbound', requireWebhookBasicAuth, async (req, res) => {
+// Mounted outside the auth check so a *refused* call is counted too. A carrier
+// posting with the wrong credentials and a carrier not posting at all produce
+// the same empty inbox, and telling them apart was the whole difficulty the
+// last time inbound messages stopped.
+const watchTychron = webhookWatch.watch('tychron', trustedProxies());
+const watchBandwidth = webhookWatch.watch('bandwidth', trustedProxies());
+
+
+app.post('/webhooks/bandwidth/inbound', watchBandwidth, requireWebhookBasicAuth, async (req, res) => {
   if (!Array.isArray(req.body)) {
     return res.status(400).json({ ok: false, error: 'Payload must be an array' });
   }
   return res.json(await processBandwidthEvents(req.body));
 });
 
-app.post('/webhooks/bandwidth/status', requireWebhookBasicAuth, async (req, res) => {
+app.post('/webhooks/bandwidth/status', watchBandwidth, requireWebhookBasicAuth, async (req, res) => {
   if (!Array.isArray(req.body)) {
     return res.status(400).json({ ok: false, error: 'Payload must be an array' });
   }
@@ -1348,7 +1416,7 @@ app.post('/webhooks/bandwidth/status', requireWebhookBasicAuth, async (req, res)
 //      it is retried forever; and a transient fault must *not* be, so that it
 //      comes back once the fault clears.
 
-app.post('/webhooks/tychron/sms', requireWebhookBasicAuth, async (req, res) => {
+app.post('/webhooks/tychron/sms', watchTychron, requireWebhookBasicAuth, async (req, res) => {
   try {
     const result = await processTychronSmsWebhook(req.body);
     if (!result.ok) {
@@ -1361,7 +1429,7 @@ app.post('/webhooks/tychron/sms', requireWebhookBasicAuth, async (req, res) => {
   return res.sendStatus(204); // never a body: a body would be sent to the customer
 });
 
-app.post('/webhooks/tychron/mms', requireWebhookBasicAuth, async (req, res) => {
+app.post('/webhooks/tychron/mms', watchTychron, requireWebhookBasicAuth, async (req, res) => {
   try {
     const result = await processTychronMmsWebhook(req.body);
     if (!result.ok) {
@@ -1436,6 +1504,13 @@ async function main() {
       process.exit(1);
     }
   }
+
+  // Read the network policy once, and hold it. Deliberately not fatal: a
+  // service that cannot learn who to trust should come up refusing traffic and
+  // saying why on its error screens, rather than exit into a restart loop where
+  // nobody can read the reason. Reloading is an operator action —
+  // POST /api/policy/reload, or the button on the screen — not a timer.
+  await loadPolicy();
 
   app.listen(port, '0.0.0.0', () => {
     console.log(`EchoService listening on :${port}`);
