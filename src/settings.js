@@ -33,12 +33,18 @@ const APP_NAME = 'service';
 const IDENTITY_BASE_NAME = 'IdentityBase';
 const IDENTITY_TABLE_NAME = 'auth_tbl_Settings';
 
-/** Keys that may be pinned in the environment, overriding their row. */
+/**
+ * Keys that may be pinned in the environment, overriding their row.
+ *
+ * MEDIA_ROOT is deliberately not among them. It is a mount point, read once at
+ * module load in mediaObtain.js — before any settings exist — and every path
+ * already on disk is relative to it, so it cannot change while the service
+ * runs. Listing it here advertised a row that nothing ever read.
+ */
 const SETTING_KEYS = [
   'CORS_ORIGINS',
   'WEBHOOK_BASIC_USER',
   'WEBHOOK_BASIC_PASS',
-  'MEDIA_ROOT',
   'BANDWIDTH_ACCOUNT_ID',
   'BANDWIDTH_API_TOKEN',
   'BANDWIDTH_API_SECRET',
