@@ -202,7 +202,7 @@ status(); setInterval(status, 10000); reload();
  * access control of its own, so that there is one place where that decision
  * is made rather than two that can disagree.
  */
-function mountLogs(app, { dbPool, policyState, callerAddress }) {
+function mountLogs(app, { echoDb, policyState, callerAddress }) {
   app.get('/logs', (_req, res) => sendOperatorPage(res, PAGE));
 
   app.get('/api/logs', (req, res) => {
@@ -266,8 +266,12 @@ function mountLogs(app, { dbPool, policyState, callerAddress }) {
   });
 
   app.get('/api/status', async (req, res) => {
-    const db = await dbPool
-      .query('SELECT 1')
+    // echoDb() builds the pool on first use and throws when the database
+    // coordinates are absent, which is the ordinary state in setup mode. That
+    // is a status to report, not a reason for this page to fail — it is most
+    // wanted exactly when something is unconfigured.
+    const db = await Promise.resolve()
+      .then(() => echoDb().query('SELECT 1'))
       .then(() => ({ ok: true }))
       .catch((err) => ({ ok: false, error: err.message }));
     const { networks, ...policy } = policyState();

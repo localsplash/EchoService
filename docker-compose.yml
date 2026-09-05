@@ -20,6 +20,9 @@ services:
       NOCODB_API_TOKEN: ${NOCODB_API_TOKEN:-}
       # Pin the trusted network instead of reading it from NocoDB.
       IDENTITY_TRUSTED_NETWORK: ${IDENTITY_TRUSTED_NETWORK:-}
+      # Widen who may reach the first-run wizard. Blank keeps the default of
+      # loopback plus the RFC1918 ranges.
+      SETUP_ALLOW_FROM: ${SETUP_ALLOW_FROM:-}
     ports:
       - "127.0.0.1:18080:8080"
     volumes:

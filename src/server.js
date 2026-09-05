@@ -85,7 +85,12 @@ function poolCoordinates() {
   const user = (process.env.DB_USER || '').trim();
   const database = (process.env.DB_NAME || '').trim();
   if (!host || !user || !database) {
-    throw new Error('DB_HOST, DB_USER and DB_NAME must be set — they say where the Echo database is');
+    // A configuration fault, not an application one — so in setup mode, where
+    // this is the ordinary state, the gate answers 503 rather than 500.
+    throw new SettingsUnavailableError(
+      'unconfigured',
+      'DB_HOST, DB_USER and DB_NAME must be set — they say where the Echo database is'
+    );
   }
   const parsed = Number.parseInt((process.env.DB_PORT || '').trim(), 10);
   return {
@@ -100,7 +105,21 @@ function poolCoordinates() {
     timezone: 'Z'
   };
 }
-const dbPool = mysql.createPool(poolCoordinates());
+/**
+ * Built on first use, not at import.
+ *
+ * Setup mode exists for a host where nothing is configured yet, and building
+ * the pool at import made poolCoordinates() throw before main() could ever
+ * reach that check — so the fresh host the wizard is for got a stack trace
+ * instead of /setup. Nothing queries the database before main() decides, and
+ * on the ordinary path refreshSettings() below still forces it at startup, so
+ * a missing DB_HOST is reported exactly as promptly as before.
+ */
+let pool = null;
+function echoDb() {
+  if (!pool) pool = mysql.createPool(poolCoordinates());
+  return pool;
+}
 
 function isAllowedOrigin(origin) {
   if (!origin) return true;
@@ -186,7 +205,7 @@ function resolveEventTypeId(eventType) {
 }
 
 async function insertMessage(input) {
-  const [rows] = await dbPool.query(
+  const [rows] = await echoDb().query(
     'CALL sms_usp_Message_INS(?, ?, ?, ?, ?, ?, ?)',
     [input.sMessageId, input.bInbound ? 1 : 0, input.iBusinessNumber, input.iCustomerNumber, input.text, input.dtCreated, input.eMessageEventTypeID]
   );
@@ -195,7 +214,7 @@ async function insertMessage(input) {
 }
 
 async function setMessageEventByExternalMessageId(params) {
-  const [rows] = await dbPool.query(
+  const [rows] = await echoDb().query(
     'CALL sms_usp_MessageEvent_SET(?, ?, ?, ?, ?)',
     [params.sMessageId, params.eMessageEventTypeID, params.dtEvent, params.iErrorCode ?? null, params.description ?? null]
   );
@@ -204,7 +223,7 @@ async function setMessageEventByExternalMessageId(params) {
 }
 
 async function listConversations(iBusinessNumber) {
-  const [rows] = await dbPool.query(
+  const [rows] = await echoDb().query(
     `SELECT
         m.iCustomerNumber,
         MAX(m.dtCreated) AS lastAt,
@@ -224,7 +243,7 @@ async function getConversationMessages(iBusinessNumber, iCustomerNumber) {
   // The carrier's reason for a failed send lives on the message-failed event
   // row; join it in so the UI can show why a message did not go out. The unique
   // (iMessageId, eMessageEventTypeID) index means this matches at most one row.
-  const [rows] = await dbPool.query(
+  const [rows] = await echoDb().query(
     `SELECT
         m.iMessageId,
         m.sMessageId,
@@ -249,7 +268,7 @@ async function getConversationMessages(iBusinessNumber, iCustomerNumber) {
 }
 
 async function markConversationRead(iBusinessNumber, iCustomerNumber) {
-  await dbPool.query(
+  await echoDb().query(
     `UPDATE sms_tbl_Message
       SET bIsRead = 1
       WHERE iBusinessNumber = ?
@@ -261,19 +280,19 @@ async function markConversationRead(iBusinessNumber, iCustomerNumber) {
 }
 
 async function markLatestConversationUnread(iBusinessNumber, iCustomerNumber) {
-  await dbPool.query('CALL sms_usp_MessageReadLatest_SET(?, ?, 0)', [iBusinessNumber, iCustomerNumber]);
+  await echoDb().query('CALL sms_usp_MessageReadLatest_SET(?, ?, 0)', [iBusinessNumber, iCustomerNumber]);
 }
 
 async function deleteMessage(iMessageId) {
-  await dbPool.query('CALL sms_usp_Message_DEL(?)', [iMessageId]);
+  await echoDb().query('CALL sms_usp_Message_DEL(?)', [iMessageId]);
 }
 
 async function deleteCustomer(iBusinessNumber, iCustomerNumber) {
-  await dbPool.query('CALL sms_usp_Customer_DEL(?, ?)', [iBusinessNumber, iCustomerNumber]);
+  await echoDb().query('CALL sms_usp_Customer_DEL(?, ?)', [iBusinessNumber, iCustomerNumber]);
 }
 
 async function insertMedia({ uidMediaId, iMessageId, providerId, iContentLength }) {
-  const [rows] = await dbPool.query(
+  const [rows] = await echoDb().query(
     'CALL sms_usp_Media_INS(?, ?, ?, ?)',
     [uidMediaId, iMessageId, providerId, iContentLength]
   );
@@ -283,30 +302,30 @@ async function insertMedia({ uidMediaId, iMessageId, providerId, iContentLength 
 }
 
 async function getMediaForMessage(iMessageId) {
-  const [rows] = await dbPool.query('CALL sms_usp_MediaByMessage_GET(?)', [iMessageId]);
+  const [rows] = await echoDb().query('CALL sms_usp_MediaByMessage_GET(?)', [iMessageId]);
   return rows?.[0] || [];
 }
 
 async function insertDraftMedia({ uidDraftMediaId, iBusinessNumber, iCustomerNumber, displayName, contentType, iContentLength, storagePath, thumbnailPath }) {
-  await dbPool.query(
+  await echoDb().query(
     'CALL sms_usp_DraftMedia_INS(?, ?, ?, ?, ?, ?, ?, ?)',
     [uidDraftMediaId, iBusinessNumber, iCustomerNumber, displayName, contentType, iContentLength, storagePath, thumbnailPath ?? null]
   );
 }
 
 async function getDraftMedia(uidDraftMediaId) {
-  const [rows] = await dbPool.query('CALL sms_usp_DraftMedia_GET(?)', [uidDraftMediaId]);
+  const [rows] = await echoDb().query('CALL sms_usp_DraftMedia_GET(?)', [uidDraftMediaId]);
   return rows?.[0]?.[0] ?? null;
 }
 
 async function getDraftMediaByCustomer(iBusinessNumber, iCustomerNumber) {
-  const [rows] = await dbPool.query('CALL sms_usp_DraftMediaByCustomer_GET(?, ?)', [iBusinessNumber, iCustomerNumber]);
+  const [rows] = await echoDb().query('CALL sms_usp_DraftMediaByCustomer_GET(?, ?)', [iBusinessNumber, iCustomerNumber]);
   return rows?.[0] || [];
 }
 
 async function deleteDraftMedia(uidDraftMediaId) {
   // Returns the pre-delete row (first result set) so callers can unlink files.
-  const [rows] = await dbPool.query('CALL sms_usp_DraftMedia_DEL(?)', [uidDraftMediaId]);
+  const [rows] = await echoDb().query('CALL sms_usp_DraftMedia_DEL(?)', [uidDraftMediaId]);
   return rows?.[0]?.[0] ?? null;
 }
 
@@ -334,7 +353,7 @@ function rmdirIfEmpty(absoluteDir) {
 const CARRIER_TYCHRON = 8;
 
 async function getBusinessPhoneSettings(iBusinessNumber) {
-  const [rows] = await dbPool.query('CALL sms_usp_BusinessPhone_GET(?)', [iBusinessNumber]);
+  const [rows] = await echoDb().query('CALL sms_usp_BusinessPhone_GET(?)', [iBusinessNumber]);
   const row = rows?.[0]?.[0];
   if (!row) return null;
   return {
@@ -344,22 +363,22 @@ async function getBusinessPhoneSettings(iBusinessNumber) {
 }
 
 async function getBusinessPhone(iBusinessNumber) {
-  const [rows] = await dbPool.query('CALL sms_usp_BusinessPhone_GET(?)', [iBusinessNumber ?? null]);
+  const [rows] = await echoDb().query('CALL sms_usp_BusinessPhone_GET(?)', [iBusinessNumber ?? null]);
   return rows?.[0] || [];
 }
 
 async function setBusinessPhone(iBusinessNumber, displayName, iCarrierApplicationId) {
-  await dbPool.query('CALL sms_usp_BusinessPhone_SET(?, ?, ?)', [iBusinessNumber, displayName ?? null, iCarrierApplicationId]);
+  await echoDb().query('CALL sms_usp_BusinessPhone_SET(?, ?, ?)', [iBusinessNumber, displayName ?? null, iCarrierApplicationId]);
 }
 
 async function getCarrierApplications(iCarrierApplicationId) {
-  const [rows] = await dbPool.query('CALL sms_usp_CarrierApplication_GET(?)', [iCarrierApplicationId ?? null]);
+  const [rows] = await echoDb().query('CALL sms_usp_CarrierApplication_GET(?)', [iCarrierApplicationId ?? null]);
   return rows?.[0] || [];
 }
 
 async function setCarrierApplication(iCarrierApplicationId, name, eCarrierId, jsonSettings) {
   const settingsJson = typeof jsonSettings === 'string' ? jsonSettings : JSON.stringify(jsonSettings);
-  const [rows] = await dbPool.query(
+  const [rows] = await echoDb().query(
     'CALL sms_usp_CarrierApplication_SET(?, ?, ?, ?)',
     [iCarrierApplicationId ?? null, name, eCarrierId, settingsJson]
   );
@@ -367,7 +386,7 @@ async function setCarrierApplication(iCarrierApplicationId, name, eCarrierId, js
 }
 
 async function getCarriers() {
-  const [rows] = await dbPool.query('SELECT eCarrierId, carrier, description FROM sms_lkp_Carrier ORDER BY eCarrierId');
+  const [rows] = await echoDb().query('SELECT eCarrierId, carrier, description FROM sms_lkp_Carrier ORDER BY eCarrierId');
   return rows || [];
 }
 
@@ -384,7 +403,7 @@ async function getCarriers() {
 
 async function insertTychronMessagePart(iMessageId, sMultipartId, sPartId) {
   try {
-    await dbPool.query('CALL sms_usp_TychronMessagePart_INS(?, ?, ?)', [iMessageId, sMultipartId, sPartId]);
+    await echoDb().query('CALL sms_usp_TychronMessagePart_INS(?, ?, ?)', [iMessageId, sMultipartId, sPartId]);
   } catch (error) {
     console.warn(`[tychron] Could not record part ${sPartId} (is EchoDatabase 010_tychron.sql applied?): ${error.message}`);
   }
@@ -392,7 +411,7 @@ async function insertTychronMessagePart(iMessageId, sMultipartId, sPartId) {
 
 async function resolveTychronPartMessageId(sPartId) {
   try {
-    const [rows] = await dbPool.query('CALL sms_usp_TychronMessagePart_GET(?)', [sPartId]);
+    const [rows] = await echoDb().query('CALL sms_usp_TychronMessagePart_GET(?)', [sPartId]);
     return rows?.[0]?.[0]?.sMessageId ?? null;
   } catch (error) {
     console.warn(`[tychron] Part lookup failed for ${sPartId} (is EchoDatabase 010_tychron.sql applied?): ${error.message}`);
@@ -564,7 +583,7 @@ async function sendViaTychron({ res, business, customer, text, draftMediaIds, se
           providerId: tychronProviderId(sMessageId, index, attachment.displayName),
           iContentLength: attachment.iContentLength || attachment.buffer.length
         });
-        await dbPool.query('CALL sms_usp_Media_SET(?, ?, ?, ?, ?)', [
+        await echoDb().query('CALL sms_usp_Media_SET(?, ?, ?, ?, ?)', [
           attachment.uidMediaId, true, relativeStoragePath(filePath), attachment.contentType, thumbnailPath
         ]);
 
@@ -630,7 +649,7 @@ app.use((req, res, next) => {
 
 // Above the settings gate on purpose: the log viewer is most wanted when the
 // settings store is the thing that is broken, so it must not depend on it.
-mountLogs(app, { dbPool, policyState, callerAddress });
+mountLogs(app, { echoDb, policyState, callerAddress });
 
 /**
  * Keep the settings fresh before anything reads them.
@@ -642,7 +661,7 @@ mountLogs(app, { dbPool, policyState, callerAddress });
  * of unreachable / missing / ambiguous it was.
  */
 app.use((_req, _res, next) => {
-  ensureFreshSettings(dbPool).then(() => next(), next);
+  ensureFreshSettings(echoDb()).then(() => next(), next);
 });
 
 app.use(cors({
@@ -654,7 +673,7 @@ app.use(cors({
 
 app.get('/health', async (_req, res) => {
   try {
-    await dbPool.query('SELECT 1');
+    await echoDb().query('SELECT 1');
     res.json({ ok: true, service: 'EchoService', db: true, timestamp: new Date().toISOString() });
   } catch (error) {
     res.status(500).json({ ok: false, service: 'EchoService', db: false, error: error.message });
@@ -974,7 +993,7 @@ app.post('/api/conversations/:customer/send', async (req, res) => {
             providerId: rec.providerId,
             iContentLength: rec.iContentLength
           });
-          await dbPool.query('CALL sms_usp_Media_SET(?, ?, ?, ?, ?)', [
+          await echoDb().query('CALL sms_usp_Media_SET(?, ?, ?, ?, ?)', [
             rec.uidMediaId, true, relativeStoragePath(filePath), rec.contentType, thumbnailPath
           ]);
 
@@ -1153,7 +1172,7 @@ async function processBandwidthEvents(events) {
             }
           }
           // Fire-and-forget: download & process media asynchronously
-          obtainPendingMedia(dbPool, iMessageId).catch(err =>
+          obtainPendingMedia(echoDb(), iMessageId).catch(err =>
             console.error(`[webhook] Async media obtain failed for message ${iMessageId}:`, err.message)
           );
         }
@@ -1294,7 +1313,7 @@ async function processTychronMmsWebhook(payload) {
           providerId: tychronProviderId(payload.id, index, attachment.displayName),
           iContentLength: attachment.buffer.length
         });
-        await dbPool.query('CALL sms_usp_Media_SET(?, ?, ?, ?, ?)', [
+        await echoDb().query('CALL sms_usp_Media_SET(?, ?, ?, ?, ?)', [
           uidMediaId, true, relativeStoragePath(filePath), attachment.contentType, thumbnailPath
         ]);
         stored += 1;
@@ -1341,7 +1360,7 @@ async function processTychronMmsWebhook(payload) {
 app.post('/api/media/obtain', async (_req, res, next) => {
   try {
     console.log('[api] Triggering obtain for ALL pending media');
-    const result = await obtainPendingMedia(dbPool, null);
+    const result = await obtainPendingMedia(echoDb(), null);
     res.json({ ok: true, ...result });
   } catch (error) {
     next(error);
@@ -1353,7 +1372,7 @@ app.post('/api/media/obtain/:messageId', async (req, res, next) => {
     const messageId = Number(req.params.messageId);
     if (!messageId) return res.status(400).json({ error: 'messageId required' });
     console.log(`[api] Triggering obtain for message ${messageId}`);
-    const result = await obtainPendingMedia(dbPool, messageId);
+    const result = await obtainPendingMedia(echoDb(), messageId);
     res.json({ ok: true, ...result });
   } catch (error) {
     next(error);
@@ -1439,11 +1458,12 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /**
  * Find the settings or die.
  *
- * Every value this service needs — its database, its Bandwidth credentials,
- * the trusted network — is a row in IdentityBase.auth_tbl_Settings. There is
- * no fallback: starting without them would mean answering every request with
- * a fault we could not explain. One retry covers the ordinary case of NocoDB
- * still coming up beside us; after that, exit saying why.
+ * The Bandwidth credentials, the webhook basic-auth pair and the CORS origins
+ * are rows in echo_tbl_Settings; the trusted network is the one value read
+ * from IdentityBase. There is no fallback: starting without them would mean
+ * answering every request with a fault we could not explain. One retry covers
+ * the ordinary case of a dependency still coming up beside us; after that,
+ * exit saying why.
  */
 async function main() {
   // Nowhere to read trustedCIDR from yet. Exiting here would be the old
@@ -1465,7 +1485,7 @@ async function main() {
 
   for (let attempt = 1; ; attempt++) {
     try {
-      await refreshSettings(dbPool);
+      await refreshSettings(echoDb());
       console.log('[settings] echo_tbl_Settings read');
       break;
     } catch (err) {
