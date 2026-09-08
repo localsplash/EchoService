@@ -17,9 +17,9 @@ const {
   settings,
   refreshSettings,
   ensureFreshSettings,
-  SettingsUnavailableError,
-  IDENTITY_BASE_NAME
+  SettingsUnavailableError
 } = require('./settings');
+const { settingsMode, sourceNames } = require('./nocoSettings');
 const {
   sendTychronMessage,
   extractMmsParts,
@@ -44,8 +44,7 @@ const {
 const { mountLogs } = require('./logsPage');
 
 // Before anything reads NOCODB_*: fold in /data/config.json, without
-// overriding what the environment already states. On a single-host install
-// this file is identity's, mounted read-only, and the wizard never runs.
+// overriding injected credentials. The optional bootstrap file is service-owned.
 applyLocalConfig();
 
 // Multer: store uploads in temp dir, max 3.5 MB per file, max 10 files
@@ -57,13 +56,7 @@ const upload = multer({
 const app = express();
 const port = process.env.PORT || 8080;
 
-/**
- * Configuration comes from echo_tbl_Settings in the Echo database — rows
- * where sApp is '*' (every Echo app) or 'service' (this one). The one value
- * read from outside that database is trustedCIDR, which is platform-wide
- * network policy and lives in the IdentityBase NocoDB base. See
- * EchoDatabase init/009_settings.sql.
- */
+/** Runtime configuration uses PlatformConfig by default; see settings.js. */
 function explicitOrigins() {
   return (settings().CORS_ORIGINS || '')
     .split(',')
@@ -71,15 +64,7 @@ function explicitOrigins() {
     .filter(Boolean);
 }
 
-/**
- * The Echo database.
- *
- * Its coordinates come from the environment, because this is where the
- * settings themselves live — a database cannot carry its own address.
- * Everything else about this service is a row in echo_tbl_Settings. No
- * invented defaults: a wrong host that looks configured is worse than one
- * that is plainly missing.
- */
+/** Database pool coordinates stay process bootstrap; changes require restart. */
 function poolCoordinates() {
   const host = (process.env.DB_HOST || '').trim();
   const user = (process.env.DB_USER || '').trim();
@@ -1455,17 +1440,10 @@ app.use((err, _req, res, _next) => {
 const RETRY_DELAY_MS = 5000;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/**
- * Find the settings or die.
- *
- * The Bandwidth credentials, the webhook basic-auth pair and the CORS origins
- * are rows in echo_tbl_Settings; the trusted network is the one value read
- * from IdentityBase. There is no fallback: starting without them would mean
- * answering every request with a fault we could not explain. One retry covers
- * the ordinary case of a dependency still coming up beside us; after that,
- * exit saying why.
- */
+/** Configured startup retries once after five seconds, then exits on failure. */
 async function main() {
+  const mode = settingsMode();
+  const { base, table } = sourceNames(mode);
   // Nowhere to read trustedCIDR from yet. Exiting here would be the old
   // behaviour and a dead end — nothing an operator does short of editing the
   // environment could recover it, and on a fresh host there is nothing to
@@ -1486,7 +1464,7 @@ async function main() {
   for (let attempt = 1; ; attempt++) {
     try {
       await refreshSettings(echoDb());
-      console.log('[settings] echo_tbl_Settings read');
+      console.log(`[settings] ${mode === 'legacy' ? 'echo_tbl_Settings + ' : ''}${base}/${table} read`);
       break;
     } catch (err) {
       const message = err && err.message ? err.message : String(err);
@@ -1497,9 +1475,8 @@ async function main() {
       }
       console.error(`[settings] ${message}`);
       console.error(
-        '[settings] Cannot start. Check DB_HOST/DB_USER/DB_NAME for the Echo database, ' +
-          'that echo_tbl_Settings exists in it, and NOCODB_BASE_URL/NOCODB_API_TOKEN for ' +
-          `the ${IDENTITY_BASE_NAME} base that carries trustedCIDR.`
+        '[settings] Cannot start. Check DB_HOST/DB_USER/DB_NAME and the service NocoDB credentials. ' +
+          `Selected settings source: ${mode === 'legacy' ? 'echo_tbl_Settings + ' : ''}${base}/${table}.`
       );
       process.exit(1);
     }

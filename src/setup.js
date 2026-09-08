@@ -9,14 +9,13 @@ const {
 } = require('./localConfig');
 const { parseCidrList, ipv4ToNumber } = require('./trust');
 const { sendOperatorPage } = require('./operatorPage');
+const { NocoSettingsStore, settingsMode } = require('./nocoSettings');
 
 /**
  * The first-run wizard: where the settings store is, and nothing else.
  *
- * This exists for the deployment that cannot share identity's config volume —
- * an EchoService on a different host from identity. On the same host the
- * volume is mounted here read-only, `config.json` is already present, and none
- * of this ever runs. See localsplash/EchoOrchestrator#7.
+ * Optional service-owned bootstrap for deployments without injected NocoDB
+ * credentials. No shared Identity volume is required.
  *
  * It asks for two values, the same two identity's wizard asks for:
  * `NOCODB_BASE_URL` and `NOCODB_API_TOKEN`. It does NOT ask for `trustedCIDR`.
@@ -88,68 +87,11 @@ function normalizeBaseUrl(raw) {
   return parsed.origin;
 }
 
-/**
- * Prove the candidate credentials before saving them.
- *
- * Resolves IdentityBase exactly the way settings.js will on the next boot, so
- * a wizard that says "saved" means the next start will work. Reaching NocoDB
- * is not enough — the base has to be there and be unique, which is the failure
- * an operator is most likely to hit (a token scoped to the wrong workspace).
- */
+/** Use the runtime reader to verify the selected store before saving. */
 async function verifyStore(baseUrl, token) {
-  const get = async (path) => {
-    let resp;
-    try {
-      resp = await fetch(`${baseUrl}${path}`, {
-        headers: { 'xc-token': token, 'Content-Type': 'application/json' },
-      });
-    } catch (err) {
-      // A bare "fetch failed" tells an operator nothing about which address
-      // did not answer, which is the only useful part.
-      const cause = err && err.cause && err.cause.code ? ` (${err.cause.code})` : '';
-      throw new Error(
-        `Could not reach NocoDB at ${baseUrl}${cause}. Check the URL is right and ` +
-          'that this container can reach it.'
-      );
-    }
-    if (resp.status === 401 || resp.status === 403) {
-      throw new Error(`NocoDB at ${baseUrl} rejected the token (${resp.status}).`);
-    }
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => '');
-      throw new Error(`NocoDB answered ${resp.status} for ${path}. ${text.slice(0, 160)}`.trim());
-    }
-    return resp.json();
-  };
-
-  const bases = await get('/api/v2/meta/bases');
-  const matches = (bases.list || []).filter((b) => b.title === 'IdentityBase');
-  if (matches.length === 0) {
-    throw new Error(
-      `No NocoDB base named IdentityBase at ${baseUrl}. identity creates it on its ` +
-        'first run — set identity up first, or check the token can see its workspace.'
-    );
-  }
-  if (matches.length > 1) {
-    throw new Error(
-      `${matches.length} NocoDB bases are named IdentityBase. The name must be unique — ` +
-        'this service will not guess which one carries the network policy.'
-    );
-  }
-  const tables = await get(`/api/v2/meta/bases/${matches[0].id}/tables`);
-  const table = (tables.list || []).find((t) => t.title === 'auth_tbl_Settings');
-  if (!table) throw new Error('The base IdentityBase has no table named auth_tbl_Settings.');
-
-  const page = await get(`/api/v2/tables/${table.id}/records?limit=200`);
-  const row = (page.list || []).find((r) => r.Key === 'trustedCIDR');
-  const trustedCIDR = row && row.Value != null ? String(row.Value).trim() : '';
-  return {
-    trustedCIDR,
-    // Reported, never fixed here. identity owns the row; if it is missing the
-    // operator should finish identity's setup rather than have this service
-    // invent a network policy.
-    trustedCIDRSet: parseCidrList(trustedCIDR).length > 0,
-  };
+  const values = await new NocoSettingsStore({ baseUrl, token, mode: settingsMode() }).get();
+  const trustedCIDR = values.trustedCIDR || '';
+  return { trustedCIDR, trustedCIDRSet: parseCidrList(trustedCIDR).length > 0 };
 }
 
 const PAGE = `<!doctype html>
@@ -203,7 +145,7 @@ document.getElementById('f').addEventListener('submit', async (e) => {
     if (!r.ok) { say('err', d.error || ('Failed with ' + r.status)); b.disabled = false; return; }
     say('ok', d.trustedCIDRSet
       ? 'Saved. Restarting to read it\\u2026'
-      : 'Saved, and restarting \\u2014 but IdentityBase has no trustedCIDR row yet. Finish the identity service\\u2019s setup; this service reads that value, it does not set it.');
+      : 'Saved, and restarting \\u2014 but the selected settings store has no trustedCIDR value yet. Finish the identity service\\u2019s setup; this service reads that value, it does not set it.');
   } catch (err) { say('err', String(err)); b.disabled = false; }
 });
 </script></body></html>`;

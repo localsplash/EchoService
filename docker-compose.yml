@@ -1,14 +1,12 @@
 # Standalone dev — for full stack use EchoOrchestrator instead.
-#
-# EchoService reads its settings from echo_tbl_Settings in the Echo database.
-# What is stated here is only what cannot describe itself: how to reach that
-# database, and how to reach the IdentityBase base carrying trustedCIDR.
+# Runtime settings come from PlatformConfig; the database pool remains bootstrap.
 services:
   echo-service:
     build: .
     container_name: echo-service
     environment:
       PORT: "8080"
+      SETTINGS_MODE: ${SETTINGS_MODE:-platform}
       DB_HOST: ${DB_HOST:-host.docker.internal}
       DB_PORT: ${DB_PORT:-13306}
       DB_USER: ${DB_USER:-echo_app}
@@ -28,12 +26,9 @@ services:
     volumes:
       - echo_media_data:/media
       # The bootstrap file the wizard writes, so answering it once survives a
-      # rebuild. On a single-host install mount identity's volume here :ro
-      # instead — see EchoOrchestrator.
+      # rebuild. This is service-owned; no shared Identity volume is needed.
       - echo_service_config:/data
-      # The rotating logs behind /logs. Its own volume because /data is
-      # read-only in the single-host arrangement, and because a log that does
-      # not survive `up --build` is not much of a log.
+      # Preserve operational logs independently from optional bootstrap data.
       - echo_service_logs:/var/log/echo
     restart: unless-stopped
 
