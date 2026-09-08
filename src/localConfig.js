@@ -7,22 +7,11 @@ const path = require('node:path');
  * The bootstrap file — the one piece of configuration that cannot live in
  * the configuration store, because it is how the store is found.
  *
- * Everything else about this service is a row in `echo_tbl_Settings`, and the
- * one value read from outside it — `trustedCIDR` — is a row in the NocoDB base
- * `IdentityBase`. The address of that NocoDB obviously cannot be either. That
- * is the whole content of this file: where it is, and the token to read it
- * with.
- *
- * This is deliberately the same shape, the same two keys and the same
- * precedence as identity's `src/localConfig.ts`. Two services that bootstrap
- * the same way can share one file, which is what makes a single-host install
- * zero-config: identity's `/setup` writes it, this service finds it already
- * there. See localsplash/EchoOrchestrator#7.
- *
- * It is NOT a second place to configure the service. Two keys, no more — the
- * moment the store is reachable, the store is the answer to everything. In
- * particular `trustedCIDR` is never written here: identity owns that row, and
- * this service only reads it.
+ * Runtime configuration is read from PlatformConfig; SETTINGS_MODE=legacy
+ * selects the prior SQL/IdentityBase readers for rollback. This optional file
+ * is service-owned and contains only the NocoDB address and read token.
+ * Deployment invariants (DB coordinates, port and mount paths) stay in the
+ * environment. Inject both NocoDB keys to avoid any file/volume dependency.
  *
  * Precedence is environment first: a deployment that already states these as
  * variables keeps doing so and never grows a file it did not ask for.
@@ -146,6 +135,8 @@ function restartToApplyConfig(delayMs = 250) {
  * merged picture and none of them has to know this file exists.
  */
 function applyLocalConfig(env = process.env, file = LOCAL_CONFIG_PATH) {
+  // Complete injected credentials make even an old unreadable mount irrelevant.
+  if (isBootstrapped(env)) return {};
   const local = readLocalConfig(file);
   for (const [key, value] of Object.entries(local)) {
     const stated = env[key];
