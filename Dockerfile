@@ -6,12 +6,11 @@ RUN npm install --omit=dev
 COPY src ./src
 
 # Preserve existing media/log volume ownership. uid 100 no longer needs to
-# match Identity: NocoDB credentials are injected per service. /data is only
-# for the optional standalone setup wizard and need not be mounted.
+# match Identity: NocoDB credentials are injected per service.
 RUN addgroup -S -g 101 app \
  && adduser -S -u 100 -G app app \
- && mkdir -p /media/_tmp /data /var/log/echo \
- && chown -R app:app /app /media /data /var/log/echo
+ && mkdir -p /media/_tmp /var/log/echo \
+ && chown -R app:app /app /media /var/log/echo
 USER app
 
 EXPOSE 8080

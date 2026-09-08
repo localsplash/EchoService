@@ -34,7 +34,7 @@ async function fixture(t, missing = false) {
   const port = reservation.address().port;
   await new Promise((resolve) => reservation.close(resolve));
   const env = {
-    ...process.env, SETTINGS_MODE: 'platform', PORT: String(port),
+    ...process.env, PORT: String(port),
     NOCODB_BASE_URL: `http://127.0.0.1:${api.address().port}`, NOCODB_API_TOKEN: 'test-token',
     // No MySQL server exists here: default startup must not query settings SQL.
     DB_HOST: '127.0.0.1', DB_PORT: '1', DB_NAME: 'unused', DB_USER: 'unused', DB_PASSWORD: '',

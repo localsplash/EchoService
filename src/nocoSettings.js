@@ -11,26 +11,15 @@ class SettingsUnavailableError extends Error {
   }
 }
 
-function settingsMode(env = process.env) {
-  const mode = env.SETTINGS_MODE || 'platform';
-  if (!['platform', 'legacy'].includes(mode)) {
-    throw new SettingsUnavailableError('unconfigured', 'SETTINGS_MODE must be platform or legacy');
-  }
-  return mode;
-}
-
-function sourceNames(mode = settingsMode()) {
-  return mode === 'legacy'
-    ? { base: 'IdentityBase', table: 'auth_tbl_Settings' }
-    : { base: 'PlatformConfig', table: 'cfg_tbl_Setting' };
+function sourceNames() {
+  return { base: 'PlatformConfig', table: 'cfg_tbl_Setting' };
 }
 
 /** Read-only discovery by name, scoped values, and a bounded cache. */
 class NocoSettingsStore {
-  constructor({ baseUrl, token, mode = settingsMode() }) {
+  constructor({ baseUrl, token }) {
     this.baseUrl = (baseUrl || '').replace(/\/+$/, '');
     this.token = token || '';
-    this.mode = settingsMode({ SETTINGS_MODE: mode });
     this.invalidate();
   }
 
@@ -56,7 +45,7 @@ class NocoSettingsStore {
     if (!this.baseUrl || !this.token) {
       throw new SettingsUnavailableError('unconfigured', 'NOCODB_BASE_URL and NOCODB_API_TOKEN are required');
     }
-    const { base, table } = sourceNames(this.mode);
+    const { base, table } = sourceNames();
     const bases = await this.api('/api/v2/meta/bases');
     const matches = bases.list.filter((item) => item.title === base);
     if (matches.length !== 1) {
@@ -81,23 +70,21 @@ class NocoSettingsStore {
         rows.push(...page.list);
         if (page.list.length < 200 || page.pageInfo?.isLastPage === true) break;
       }
-      const relevant = this.mode === 'legacy'
-        ? rows.filter((row) => row.Key === 'trustedCIDR')
-        : rows.filter((row) => SCOPES.includes(row.app));
+      const relevant = rows.filter((row) => SCOPES.includes(row.app));
       const seen = new Set();
       for (const row of relevant) {
-        const key = this.mode === 'legacy' ? row.Key : row.settingKey;
+        const key = row.settingKey;
         if (typeof key !== 'string' || !key.trim()) throw new Error('Invalid scoped configuration key');
-        const scopedKey = JSON.stringify([this.mode === 'legacy' ? 'legacy' : row.app, key]);
+        const scopedKey = JSON.stringify([row.app, key]);
         if (seen.has(scopedKey)) throw new Error('Duplicate scoped configuration key');
         seen.add(scopedKey);
       }
       // Configuration keys must not change object inheritance.
       const values = Object.create(null);
-      for (const scope of this.mode === 'legacy' ? [undefined] : SCOPES) {
-        for (const row of relevant.filter((item) => this.mode === 'legacy' || item.app === scope)) {
-          const key = this.mode === 'legacy' ? row.Key : row.settingKey;
-          const raw = this.mode === 'legacy' ? row.Value : row.settingValue;
+      for (const scope of SCOPES) {
+        for (const row of relevant.filter((item) => item.app === scope)) {
+          const key = row.settingKey;
+          const raw = row.settingValue;
           if (raw != null && String(raw).trim()) values[key] = String(raw).trim();
         }
       }
@@ -112,4 +99,4 @@ class NocoSettingsStore {
   }
 }
 
-module.exports = { CACHE_TTL_MS, SCOPES, SettingsUnavailableError, settingsMode, sourceNames, NocoSettingsStore };
+module.exports = { CACHE_TTL_MS, SCOPES, SettingsUnavailableError, sourceNames, NocoSettingsStore };

@@ -66,7 +66,7 @@ function trustedProxies() {
  * is unknown.
  *
  * The policy cannot gate the screen that explains why the policy is missing,
- * so this uses the same fixed rule `setup.js` uses for the first-run wizard:
+ * so this uses the fixed deployment bootstrap networks:
  * loopback and the RFC1918 ranges, which is where an operator actually is. It
  * is applied to the *resolved* client address, not the socket peer — behind
  * the proxy every peer is RFC1918 and the check would pass for the whole
