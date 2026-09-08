@@ -24,22 +24,19 @@ docker compose up -d --build
 - `GET|POST|PUT /api/carriers`, `/api/carrier-applications`, `/api/business-phones`
 - `POST /api/media/obtain[/:messageId]` — fetch provider-hosted media
 - `POST /webhooks/bandwidth/{inbound,status}`, `/webhooks/tychron/{sms,mms}`
-- `GET /setup`, `GET /api/setup/status`, `POST /api/setup/bootstrap` — first run
 
 ## Configuration
 
-`SETTINGS_MODE=platform` is the default. The read-only NocoDB reader resolves
+`PlatformConfig/cfg_tbl_Setting` is the only runtime settings source. The read-only NocoDB reader resolves
 `PlatformConfig/cfg_tbl_Setting` by unique names and combines nonblank values
 in scope order `*`, `echo`, `echo-service` (most specific wins). It never reads
-`echo_tbl_Settings` or `IdentityBase` in this mode. Duplicate scoped keys or
+legacy SQL settings or IdentityBase. Duplicate scoped keys or
 ambiguous/missing bases and tables fail the read; blank rows are unset.
 
-Provide `NOCODB_BASE_URL` and a service-owned `NOCODB_API_TOKEN`. An optional
-`/data/config.json` (or `ECHO_CONFIG_DIR/config.json`) can supply missing bootstrap
-keys. Complete environment credentials skip the file; no Identity configuration
-volume is required. Without bootstrap credentials, the restricted `/setup`
-wizard remains available. It verifies the selected store with the runtime reader,
-saves only the two bootstrap keys, and restarts.
+Provide `NOCODB_BASE_URL` and a service-owned `NOCODB_API_TOKEN` directly in
+the deployment environment. File bootstrap, shared Identity mounts, and the
+first-run settings wizard have been removed. Missing credentials follow the
+same retry-once then exit behavior as any unavailable settings source.
 
 The reader caches values and discovered IDs for 30 seconds. Configured startup
 retries once after five seconds, then exits if the selected source is unavailable.
@@ -64,34 +61,26 @@ refresh. This service never writes settings or network policy.
 | `PORT` | Listener, default `8080` |
 | `MEDIA_ROOT` | Media mount path, default `/media`; match EchoMedia's shared mount |
 | `NOCODB_BASE_URL`, `NOCODB_API_TOKEN` | Service-specific settings-store bootstrap |
-| `SETTINGS_MODE` | `platform` by default; `legacy` only for coordinated rollback |
-| `ECHO_CONFIG_DIR`, `SETUP_ALLOW_FROM`, `TRUSTED_PROXIES` | Optional local bootstrap/proxy controls |
+| `TRUSTED_PROXIES` | Optional deployment proxy trust control |
 
 Database coordinates, ports, media paths and bootstrap credentials require a
 restart to change. They are deployment invariants, not hot-reloaded scoped
 settings. There is no dotenv loader: export variables for `npm start`; Compose
 forwards the variables in its environment block.
 
-## Rollout and retirement
+## Disposable Dev deployment
 
-`SETTINGS_MODE=legacy` explicitly restores the original SQL settings reader
-(`sApp=*` then `service`) and `IdentityBase/auth_tbl_Settings` network policy.
-It is an operator-selected compatibility mode, never an automatic fallback.
+The current Dev environment deliberately discards obsolete settings and local
+authentication/provenance data. There is no legacy mode, preserved SQL settings
+copy or rollback waiting period. Deploy this service and the matching EchoWeb
+revision with service-owned NocoDB credentials, then apply EchoDatabase migration
+`013_retire_legacy_configuration_and_auth.sql`.
 
-Before deployment, seed and verify the effective `*`, `echo`, `echo-service`
-values, service token access, and the unchanged Echo database coordinates.
-Deploy the matching EchoOrchestrator wiring, then exercise actual inbound and
-outbound SMS/MMS, media delivery, webhook authentication, network-policy gates,
-and settings-store failure/recovery. A dev merge is not evidence of that check.
-Record deployment versions, results, rollback owner and rollback end date in
-[EchoOrchestrator #11](https://github.com/localsplash/EchoOrchestrator/issues/11).
-
-Keep `echo_tbl_Settings`, the legacy source data, and the rollback deployment
-until every remaining consumer is migrated and verified and the agreed rollback
-window has ended. Removing compatibility readers and dropping the table are
-following releases coordinated by
-[EchoDatabase #8](https://github.com/localsplash/EchoDatabase/issues/8).
-`echo_tbl_SchemaMigration` remains the schema ledger.
+Verify effective `*`, `echo`, `echo-service` values, database connectivity,
+webhook authentication, network-policy gates, inbound/outbound SMS/MMS, media,
+and settings failure/recovery in the running Dev deployment. Record the exact
+versions and results in [EchoOrchestrator #11](https://github.com/localsplash/EchoOrchestrator/issues/11).
+Active `sms_*` tables and the migration ledger remain in use.
 
 Asterisk/OfficePulse own PBX extensions, queues, memberships, trunks, and
 operational state. This SMS/MMS service does not replicate or provision them.
@@ -108,8 +97,8 @@ media volume to this container user.
 
 Use Node 22 (or the Docker image's supported Node runtime), `npm ci`, then
 `npm test`. The settings tests use controlled HTTP responses and a SQL spy to
-verify scope precedence, pagination, cache expiry, failure recovery, explicit
-legacy compatibility, setup verification and service-owned bootstrap. The startup suite launches the actual service against a temporary loopback
+verify scope precedence, pagination, cache expiry, failure recovery, rejection
+of the retired source and required service-owned bootstrap. The startup suite launches the actual service against a temporary loopback
 settings endpoint, checks webhook authentication, and verifies retry-once then
 exit with no MySQL settings server. Tests do not claim live provider or
 deployment validation.

@@ -6,33 +6,23 @@ services:
     container_name: echo-service
     environment:
       PORT: "8080"
-      SETTINGS_MODE: ${SETTINGS_MODE:-platform}
       DB_HOST: ${DB_HOST:-host.docker.internal}
       DB_PORT: ${DB_PORT:-13306}
       DB_USER: ${DB_USER:-echo_app}
       DB_PASSWORD: ${DB_PASSWORD:-devpass}
       DB_NAME: ${DB_NAME:-echo_db}
-      # Optional. Blank means: look in /data/config.json, and failing that
-      # start in setup mode and ask at /setup.
-      NOCODB_BASE_URL: ${NOCODB_BASE_URL:-}
-      NOCODB_API_TOKEN: ${NOCODB_API_TOKEN:-}
+      NOCODB_BASE_URL: ${NOCODB_BASE_URL:?Set the PlatformConfig NocoDB URL}
+      NOCODB_API_TOKEN: ${NOCODB_API_TOKEN:?Set this service NocoDB token}
       # Pin the trusted network instead of reading it from NocoDB.
       IDENTITY_TRUSTED_NETWORK: ${IDENTITY_TRUSTED_NETWORK:-}
-      # Widen who may reach the first-run wizard. Blank keeps the default of
-      # loopback plus the RFC1918 ranges.
-      SETUP_ALLOW_FROM: ${SETUP_ALLOW_FROM:-}
     ports:
       - "127.0.0.1:18080:8080"
     volumes:
       - echo_media_data:/media
-      # The bootstrap file the wizard writes, so answering it once survives a
-      # rebuild. This is service-owned; no shared Identity volume is needed.
-      - echo_service_config:/data
       # Preserve operational logs independently from optional bootstrap data.
       - echo_service_logs:/var/log/echo
     restart: unless-stopped
 
 volumes:
   echo_media_data:
-  echo_service_config:
   echo_service_logs:

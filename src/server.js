@@ -19,7 +19,7 @@ const {
   ensureFreshSettings,
   SettingsUnavailableError
 } = require('./settings');
-const { settingsMode, sourceNames } = require('./nocoSettings');
+const { sourceNames } = require('./nocoSettings');
 const {
   sendTychronMessage,
   extractMmsParts,
@@ -29,8 +29,6 @@ const {
   tychronStatusDescription
 } = require('./tychron');
 const { clientInTrustedNetwork } = require('./trust');
-const { applyLocalConfig, isBootstrapped, LOCAL_CONFIG_PATH } = require('./localConfig');
-const { mountSetup } = require('./setup');
 const logbook = require('./logbook');
 const webhookWatch = require('./webhookWatch');
 const {
@@ -42,10 +40,6 @@ const {
   callerAddress
 } = require('./networkPolicy');
 const { mountLogs } = require('./logsPage');
-
-// Before anything reads NOCODB_*: fold in /data/config.json, without
-// overriding injected credentials. The optional bootstrap file is service-owned.
-applyLocalConfig();
 
 // Multer: store uploads in temp dir, max 3.5 MB per file, max 10 files
 const upload = multer({
@@ -70,8 +64,6 @@ function poolCoordinates() {
   const user = (process.env.DB_USER || '').trim();
   const database = (process.env.DB_NAME || '').trim();
   if (!host || !user || !database) {
-    // A configuration fault, not an application one — so in setup mode, where
-    // this is the ordinary state, the gate answers 503 rather than 500.
     throw new SettingsUnavailableError(
       'unconfigured',
       'DB_HOST, DB_USER and DB_NAME must be set — they say where the Echo database is'
@@ -90,16 +82,7 @@ function poolCoordinates() {
     timezone: 'Z'
   };
 }
-/**
- * Built on first use, not at import.
- *
- * Setup mode exists for a host where nothing is configured yet, and building
- * the pool at import made poolCoordinates() throw before main() could ever
- * reach that check — so the fresh host the wizard is for got a stack trace
- * instead of /setup. Nothing queries the database before main() decides, and
- * on the ordinary path refreshSettings() below still forces it at startup, so
- * a missing DB_HOST is reported exactly as promptly as before.
- */
+/** The application pool is validated at startup and reused for data requests. */
 let pool = null;
 function echoDb() {
   if (!pool) pool = mysql.createPool(poolCoordinates());
@@ -592,10 +575,6 @@ app.use(express.json({ limit: '10mb' }));
 // exactly as before.
 app.use(morgan('combined', { stream: logbook.morganStream }));
 
-// The first-run wizard, before the settings gate below — it is the thing that
-// answers the question that gate is failing on, so it cannot sit behind it.
-mountSetup(app);
-
 // Settings-free, so it answers while the store is down: "the process is up"
 // stays distinguishable from "the process cannot read its settings".
 app.get('/ping', (_req, res) => {
@@ -616,16 +595,13 @@ mountPolicy(app);
  *     ones, so a carrier going quiet stays visible.
  *   - `/ping` — the container HEALTHCHECK, and the one thing that should still
  *     answer when nothing else can. It reveals nothing.
- *   - `/setup`, `/api/setup/` — the first-run wizard, which cannot sit behind a
- *     policy it has not been told where to find. It gates itself to the
- *     deployment network.
  *   - `/api/policy` — the way out of a failed load, gated in the same way.
  *
  * Everything else — the whole `/api` surface and the log viewer — is now
  * refused unless the caller is inside trustedCIDR. Before this, all of it was
  * readable by anyone who knew the hostname.
  */
-const OPEN_TO_ANY_NETWORK = [/^\/webhooks\//, /^\/ping$/, /^\/setup$/, /^\/api\/setup\//, /^\/api\/policy/];
+const OPEN_TO_ANY_NETWORK = [/^\/webhooks\//, /^\/ping$/, /^\/api\/policy/];
 
 app.use((req, res, next) => {
   if (OPEN_TO_ANY_NETWORK.some((pattern) => pattern.test(req.path))) return next();
@@ -646,7 +622,7 @@ mountLogs(app, { echoDb, policyState, callerAddress });
  * of unreachable / missing / ambiguous it was.
  */
 app.use((_req, _res, next) => {
-  ensureFreshSettings(echoDb()).then(() => next(), next);
+  ensureFreshSettings().then(() => next(), next);
 });
 
 app.use(cors({
@@ -1442,29 +1418,12 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Configured startup retries once after five seconds, then exits on failure. */
 async function main() {
-  const mode = settingsMode();
-  const { base, table } = sourceNames(mode);
-  // Nowhere to read trustedCIDR from yet. Exiting here would be the old
-  // behaviour and a dead end — nothing an operator does short of editing the
-  // environment could recover it, and on a fresh host there is nothing to
-  // edit. So come up serving the wizard instead, and let it restart us onto a
-  // real configuration. Everything else stays refused by the settings gate.
-  if (!isBootstrapped()) {
-    console.warn(
-      '[settings] No NOCODB_BASE_URL / NOCODB_API_TOKEN, and no bootstrap file at ' +
-        `${LOCAL_CONFIG_PATH}. Starting in setup mode: open /setup from the ` +
-        'deployment network to say where the settings store is.'
-    );
-    app.listen(port, '0.0.0.0', () => {
-      console.log(`EchoService listening on :${port} (setup mode)`);
-    });
-    return;
-  }
-
+  const { base, table } = sourceNames();
   for (let attempt = 1; ; attempt++) {
     try {
-      await refreshSettings(echoDb());
-      console.log(`[settings] ${mode === 'legacy' ? 'echo_tbl_Settings + ' : ''}${base}/${table} read`);
+      echoDb(); // Validate application database bootstrap before accepting traffic.
+      await refreshSettings();
+      console.log(`[settings] ${base}/${table} read`);
       break;
     } catch (err) {
       const message = err && err.message ? err.message : String(err);
@@ -1476,7 +1435,7 @@ async function main() {
       console.error(`[settings] ${message}`);
       console.error(
         '[settings] Cannot start. Check DB_HOST/DB_USER/DB_NAME and the service NocoDB credentials. ' +
-          `Selected settings source: ${mode === 'legacy' ? 'echo_tbl_Settings + ' : ''}${base}/${table}.`
+          `Selected settings source: ${base}/${table}.`
       );
       process.exit(1);
     }

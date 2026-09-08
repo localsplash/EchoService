@@ -1,13 +1,9 @@
 'use strict';
 
 const {
-  CACHE_TTL_MS, SettingsUnavailableError, settingsMode, NocoSettingsStore,
+  CACHE_TTL_MS, SettingsUnavailableError, NocoSettingsStore,
 } = require('./nocoSettings');
 
-// Legacy SQL names are used only with explicit SETTINGS_MODE=legacy.
-const APP_NAME = 'service';
-const IDENTITY_BASE_NAME = 'IdentityBase';
-const IDENTITY_TABLE_NAME = 'auth_tbl_Settings';
 const SETTING_KEYS = [
   'CORS_ORIGINS',
   'WEBHOOK_BASIC_USER',
@@ -35,26 +31,8 @@ function nocoStore() {
   if (!store) store = new NocoSettingsStore({
     baseUrl: process.env.NOCODB_BASE_URL,
     token: process.env.NOCODB_API_TOKEN,
-    mode: settingsMode(),
   });
   return store;
-}
-
-/** Legacy reader is retained for an operator-selected rollback only. */
-async function readEchoSettings(pool, app = APP_NAME) {
-  const [rows] = await pool.query(
-    `SELECT sApp, sKey, sValue FROM echo_tbl_Settings
-      WHERE sApp IN ('*', ?)
-      ORDER BY sApp = ?`,
-    [app, app]
-  );
-  const values = {};
-  for (const row of rows) {
-    if (row.sValue != null && String(row.sValue).trim() !== '') {
-      values[row.sKey] = String(row.sValue).trim();
-    }
-  }
-  return values;
 }
 
 /** No configured policy means trust nobody. Platform reads never fall back. */
@@ -64,23 +42,10 @@ async function readTrustedCidr() {
   return (await nocoStore().get()).trustedCIDR || '';
 }
 
-async function refreshSettings(pool) {
+async function refreshSettings() {
   try {
-    let values;
-    if (settingsMode() === 'legacy') {
-      values = { ...(await readEchoSettings(pool)), ...overridesFromEnv() };
-      // Preserve the legacy rollback's separate network-policy availability.
-      const previous = cache?.settings.trustedCIDR;
-      try {
-        values.trustedCIDR = await readTrustedCidr();
-      } catch (error) {
-        values.trustedCIDR = previous === undefined ? '' : previous;
-        values.trustedCIDRError = error.message;
-      }
-    } else {
-      values = { ...(await nocoStore().get()), ...overridesFromEnv() };
-      values.trustedCIDR = (process.env.IDENTITY_TRUSTED_NETWORK || '').trim() || values.trustedCIDR || '';
-    }
+    const values = { ...(await nocoStore().get()), ...overridesFromEnv() };
+    values.trustedCIDR = (process.env.IDENTITY_TRUSTED_NETWORK || '').trim() || values.trustedCIDR || '';
     cache = { at: Date.now(), settings: values };
     return values;
   } catch (error) {
@@ -91,9 +56,9 @@ async function refreshSettings(pool) {
   }
 }
 
-async function ensureFreshSettings(pool) {
+async function ensureFreshSettings() {
   if (cache && Date.now() - cache.at < CACHE_TTL_MS) return cache.settings;
-  return refreshSettings(pool);
+  return refreshSettings();
 }
 
 function settings() {
@@ -108,7 +73,7 @@ function invalidateSettings() {
 }
 
 module.exports = {
-  APP_NAME, IDENTITY_BASE_NAME, IDENTITY_TABLE_NAME, CACHE_TTL_MS, SETTING_KEYS,
-  SettingsUnavailableError, readEchoSettings, readTrustedCidr, refreshSettings,
+  CACHE_TTL_MS, SETTING_KEYS,
+  SettingsUnavailableError, readTrustedCidr, refreshSettings,
   ensureFreshSettings, settings, invalidateSettings,
 };
