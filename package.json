@@ -6,7 +6,9 @@
   "type": "commonjs",
   "scripts": {
     "start": "node src/server.js",
-    "test": "node --test test/*.test.js"
+    "test": "npm run test:version && node --test test/*.test.js",
+    "build": "node scripts/write-build-info.mjs src/build-info.json",
+    "test:version": "node --test scripts/check-build-info.mjs"
   },
   "dependencies": {
     "cors": "^2.8.5",

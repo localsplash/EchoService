@@ -1,9 +1,16 @@
 FROM node:20-alpine
+ENV TZ=America/Los_Angeles
+RUN apk add --no-cache tzdata
 RUN apk add --no-cache ffmpeg
 WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev
 COPY src ./src
+COPY scripts/write-build-info.mjs scripts/
+ARG BUILD_REVISION
+ARG SOURCE_DATE_EPOCH
+ARG BUILD_DIRTY
+RUN npm run build
 
 # Preserve existing media/log volume ownership. uid 100 no longer needs to
 # match Identity: NocoDB credentials are injected per service.

@@ -1,3 +1,6 @@
+require('./timezone');
+const buildInfo = require('./buildInfo');
+
 // First, before any other module can log a line: capture console output to the
 // ring and the files behind /logs. Nothing is diverted — stdout is unchanged.
 require('./logbook').install();
@@ -577,8 +580,8 @@ app.use(morgan('combined', { stream: logbook.morganStream }));
 
 // Settings-free, so it answers while the store is down: "the process is up"
 // stays distinguishable from "the process cannot read its settings".
-app.get('/ping', (_req, res) => {
-  res.json({ message: 'pong', service: 'EchoService' });
+app.get(['/ping', '/healthz'], (_req, res) => {
+  res.json({ message: 'pong', service: 'EchoService', ...buildInfo });
 });
 
 // Reading and reloading the network policy, mounted above the gate that policy
@@ -635,9 +638,9 @@ app.use(cors({
 app.get('/health', async (_req, res) => {
   try {
     await echoDb().query('SELECT 1');
-    res.json({ ok: true, service: 'EchoService', db: true, timestamp: new Date().toISOString() });
+    res.json({ ok: true, service: 'EchoService', ...buildInfo, db: true, timestamp: new Date().toISOString() });
   } catch (error) {
-    res.status(500).json({ ok: false, service: 'EchoService', db: false, error: error.message });
+    res.status(500).json({ ok: false, service: 'EchoService', ...buildInfo, db: false, error: error.message });
   }
 });
 
