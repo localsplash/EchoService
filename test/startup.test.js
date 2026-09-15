@@ -59,7 +59,11 @@ test('real service starts from PlatformConfig without SQL settings and applies s
   }
   assert.match(f.output(), /PlatformConfig\/cfg_tbl_Setting read/);
   const origin = `http://127.0.0.1:${f.port}`;
-  assert.equal((await fetch(`${origin}/ping`)).status, 200);
+  for (const endpoint of ['/ping', '/healthz']) {
+    const health = await fetch(origin + endpoint);
+    assert.equal(health.status, 200);
+    assert.deepEqual(await health.json(), { message: 'pong', service: 'EchoService', ...require('../src/buildInfo') });
+  }
   const denied = await fetch(`${origin}/webhooks/bandwidth/inbound`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '[]' });
   assert.equal(denied.status, 401);
   const accepted = await fetch(`${origin}/webhooks/bandwidth/inbound`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Basic ${Buffer.from('test-user:test-pass').toString('base64')}` }, body: '[]' });

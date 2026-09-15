@@ -102,3 +102,40 @@ of the retired source and required service-owned bootstrap. The startup suite la
 settings endpoint, checks webhook authentication, and verifies retry-once then
 exit with no MySQL settings server. Tests do not claim live provider or
 deployment validation.
+
+## Health version and Pacific timezone
+
+The liveness response includes `version` (`YYYY.M.D.H.M`), full Git `revision`,
+`sourceUpdatedAt` (ISO 8601 with Pacific offset), `timeZone` (`America/Los_Angeles`),
+and `dirty`. Existing status fields and readiness behavior are preserved.
+EchoService exposes `/healthz` as an alias of settings-independent `/ping`; the gated
+`/health` database check also includes the identity.
+
+Versions use HEAD's committer timestamp in Pacific time (PST/PDT), never build time.
+For example, `2026-09-14T21:30:42Z` becomes `2026.9.14.14.30` and
+`sourceUpdatedAt: "2026-09-14T14:30:42-07:00"`. The clock belongs to the machine
+creating the commit, including GitHub for web-created commits. Rebuilding a commit
+preserves its version. Same-minute commits and the repeated autumn DST hour are
+distinguished by `revision`; dates alone are not a monotonic sequence.
+
+`npm run build` embeds identity in the artifact. Uncommitted/staged/untracked changes
+append `-dirty`; commit before building releases. Unbuilt source development reports
+`unbuilt` with null revision fields. Package and API contract versions stay separate.
+Runtime `TZ` defaults to `America/Los_Angeles` and may be overridden explicitly;
+version formatting always stays Pacific. Docker includes timezone data. Explicit UTC
+storage/protocol timestamp contracts remain UTC to preserve existing data semantics.
+
+Docker/source archive builds require all three values: `BUILD_REVISION` (full SHA),
+`SOURCE_DATE_EPOCH` (Git committer epoch), and `BUILD_DIRTY` (`true` or `false`).
+Missing or malformed identity fails the build. The wrapper derives them from Git:
+
+```sh
+scripts/with-build-info.sh sh -c 'docker build \
+  --build-arg BUILD_REVISION --build-arg SOURCE_DATE_EPOCH --build-arg BUILD_DIRTY \
+  -t echoservice:local .'
+scripts/with-build-info.sh docker compose up -d --build
+
+```
+
+External orchestrators building this Dockerfile must forward these same build args.
+No runtime Git checkout or version environment override is needed.
