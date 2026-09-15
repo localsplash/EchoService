@@ -92,15 +92,37 @@ test('cache expires after 30 seconds; failure discards IDs and values and recove
   assert.equal(recovered.length, 3);
 });
 
-test('environment overrides do not bypass PlatformConfig', async () => {
+test('a same-named environment variable never shadows the row', async () => {
+  bootstrap();
+  // These are credentials. A pin that quietly outranked the store meant
+  // rotating a password in PlatformConfig looked applied while the old value
+  // stayed in force, with nothing on the host to explain it.
+  process.env.CORS_ORIGINS = 'env';
+  process.env.WEBHOOK_BASIC_PASS = 'stale-pin';
+  mockStore([
+    row('echo-service', 'CORS_ORIGINS', 'row'),
+    row('echo-service', 'WEBHOOK_BASIC_PASS', 'rotated'),
+  ]);
+  const values = await refreshSettings();
+  assert.equal(values.CORS_ORIGINS, 'row');
+  assert.equal(values.WEBHOOK_BASIC_PASS, 'rotated');
+});
+
+test('an unreadable store fails rather than falling back to the environment', async () => {
   bootstrap();
   process.env.CORS_ORIGINS = 'env';
-  mockStore([row('echo-service', 'CORS_ORIGINS', 'row')]);
-  assert.equal((await refreshSettings()).CORS_ORIGINS, 'env');
-  invalidateSettings();
   global.fetch = async () => { throw new Error('offline'); };
   await assert.rejects(refreshSettings(), /offline/);
   assert.throws(settings, /not been read/);
+});
+
+test('IDENTITY_TRUSTED_NETWORK is a deployment pin, not a runtime setting', async () => {
+  bootstrap();
+  // Resolved ahead of the store in readTrustedCidr(); removing the override
+  // layer must not have swept it up with the eight runtime keys.
+  process.env.IDENTITY_TRUSTED_NETWORK = '10.9.0.0/16';
+  mockStore([row('*', 'trustedCIDR', '10.0.0.0/8')]);
+  assert.equal((await refreshSettings()).trustedCIDR, '10.9.0.0/16');
 });
 
 test('expired runtime snapshots are unavailable after a failed refresh', async () => {

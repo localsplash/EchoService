@@ -47,8 +47,9 @@ database behind the network/settings gates.
 
 Runtime keys are `CORS_ORIGINS`, `WEBHOOK_BASIC_USER`, `WEBHOOK_BASIC_PASS`,
 `BANDWIDTH_ACCOUNT_ID`, `BANDWIDTH_API_TOKEN`, `BANDWIDTH_API_SECRET`,
-`BANDWIDTH_APPLICATION_ID`, and `BANDWIDTH_MESSAGING_API_BASE_URL`. Nonblank
-values explicitly pinned in the environment override these rows. The shared
+`BANDWIDTH_APPLICATION_ID`, and `BANDWIDTH_MESSAGING_API_BASE_URL`. These come
+only from PlatformConfig; a same-named environment variable is ignored, so a
+rotated row always takes effect. The shared
 `trustedCIDR` policy belongs in global scope `*`; `IDENTITY_TRUSTED_NETWORK`
 remains an explicit deployment override. The API policy is loaded at startup
 and on operator reload; its established policy is retained after a failed policy

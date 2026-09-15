@@ -4,6 +4,19 @@ const {
   CACHE_TTL_MS, SettingsUnavailableError, NocoSettingsStore,
 } = require('./nocoSettings');
 
+/**
+ * Runtime keys, read only from PlatformConfig.
+ *
+ * A same-named environment variable is ignored. These used to be pinnable in
+ * the environment, where a nonblank value won over the row — and because most
+ * of them are credentials, a stale pin meant rotating WEBHOOK_BASIC_PASS or a
+ * Bandwidth secret in the store appeared to work while the old value stayed in
+ * force, with nothing on the host to say why.
+ *
+ * IDENTITY_TRUSTED_NETWORK is deliberately not one of these: it is a
+ * deployment network-policy pin resolved ahead of the store in
+ * readTrustedCidr(), not a runtime setting. Leave it where it is.
+ */
 const SETTING_KEYS = [
   'CORS_ORIGINS',
   'WEBHOOK_BASIC_USER',
@@ -14,15 +27,6 @@ const SETTING_KEYS = [
   'BANDWIDTH_APPLICATION_ID',
   'BANDWIDTH_MESSAGING_API_BASE_URL',
 ];
-
-function overridesFromEnv(env = process.env) {
-  const overrides = {};
-  for (const key of SETTING_KEYS) {
-    const raw = env[key];
-    if (typeof raw === 'string' && raw.trim() !== '') overrides[key] = raw.trim();
-  }
-  return overrides;
-}
 
 let cache = null;
 let store = null;
@@ -44,7 +48,7 @@ async function readTrustedCidr() {
 
 async function refreshSettings() {
   try {
-    const values = { ...(await nocoStore().get()), ...overridesFromEnv() };
+    const values = { ...(await nocoStore().get()) };
     values.trustedCIDR = (process.env.IDENTITY_TRUSTED_NETWORK || '').trim() || values.trustedCIDR || '';
     cache = { at: Date.now(), settings: values };
     return values;
