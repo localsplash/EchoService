@@ -116,13 +116,11 @@ test('an unreadable store fails rather than falling back to the environment', as
   assert.throws(settings, /not been read/);
 });
 
-test('IDENTITY_TRUSTED_NETWORK is a deployment pin, not a runtime setting', async () => {
+test('trustedCIDR comes only from PlatformConfig despite a stale environment pin', async () => {
   bootstrap();
-  // Resolved ahead of the store in readTrustedCidr(); removing the override
-  // layer must not have swept it up with the eight runtime keys.
   process.env.IDENTITY_TRUSTED_NETWORK = '10.9.0.0/16';
   mockStore([row('*', 'trustedCIDR', '10.0.0.0/8')]);
-  assert.equal((await refreshSettings()).trustedCIDR, '10.9.0.0/16');
+  assert.equal((await refreshSettings()).trustedCIDR, '10.0.0.0/8');
 });
 
 test('expired runtime snapshots are unavailable after a failed refresh', async () => {

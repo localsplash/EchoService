@@ -54,34 +54,11 @@ const upload = multer({
 const app = express();
 const port = process.env.PORT || 8080;
 
-/** Database pool coordinates stay process bootstrap; changes require restart. */
-function poolCoordinates() {
-  const host = (process.env.DB_HOST || '').trim();
-  const user = (process.env.DB_USER || '').trim();
-  const database = (process.env.DB_NAME || '').trim();
-  if (!host || !user || !database) {
-    throw new SettingsUnavailableError(
-      'unconfigured',
-      'DB_HOST, DB_USER and DB_NAME must be set — they say where the Echo database is'
-    );
-  }
-  const parsed = Number.parseInt((process.env.DB_PORT || '').trim(), 10);
-  return {
-    host,
-    // MySQL's own registered port — the protocol's default, not a guess.
-    port: Number.isFinite(parsed) && parsed > 0 ? parsed : 3306,
-    user,
-    password: process.env.DB_PASSWORD || '',
-    database,
-    waitForConnections: true,
-    connectionLimit: 10,
-    timezone: 'Z'
-  };
-}
+const { poolCoordinates } = require('./database');
 /** The application pool is validated at startup and reused for data requests. */
 let pool = null;
 function echoDb() {
-  if (!pool) pool = mysql.createPool(poolCoordinates());
+  if (!pool) pool = mysql.createPool(poolCoordinates(settings()));
   return pool;
 }
 
@@ -1408,7 +1385,6 @@ async function main() {
   const { base, table } = sourceNames();
   for (let attempt = 1; ; attempt++) {
     try {
-      echoDb(); // Validate application database bootstrap before accepting traffic.
       await refreshSettings();
       console.log(`[settings] ${base}/${table} read`);
       break;

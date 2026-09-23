@@ -2,7 +2,7 @@
 #   docker compose -f compose.dev.yaml up -d --build
 # An environment deploys this service with compose.yaml instead, plus
 # compose.proxy.yaml where carriers deliver webhooks to it.
-# Runtime settings come from PlatformConfig; the database pool remains bootstrap.
+# Runtime settings and database coordinates come from PlatformConfig.
 services:
   echo-service:
     build:
@@ -15,15 +15,8 @@ services:
     environment:
       TZ: ${TZ:-America/Los_Angeles}
       PORT: "8080"
-      DB_HOST: ${DB_HOST:-host.docker.internal}
-      DB_PORT: ${DB_PORT:-13306}
-      DB_USER: ${DB_USER:-echo_service}
-      DB_PASSWORD: ${DB_PASSWORD:-devpass}
-      DB_NAME: ${DB_NAME:-echo_db}
       NOCODB_BASE_URL: ${NOCODB_BASE_URL:?Set the PlatformConfig NocoDB URL}
       NOCODB_API_TOKEN: ${NOCODB_API_TOKEN:?Set this service NocoDB token}
-      # Pin the trusted network instead of reading it from NocoDB.
-      IDENTITY_TRUSTED_NETWORK: ${IDENTITY_TRUSTED_NETWORK:-}
     ports:
       - "127.0.0.1:18080:8080"
     volumes:

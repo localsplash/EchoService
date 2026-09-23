@@ -13,11 +13,10 @@ const {
  * Bandwidth secret in the store appeared to work while the old value stayed in
  * force, with nothing on the host to say why.
  *
- * IDENTITY_TRUSTED_NETWORK is deliberately not one of these: it is a
- * deployment network-policy pin resolved ahead of the store in
- * readTrustedCidr(), not a runtime setting. Leave it where it is.
+ * MySQL coordinates also come from PlatformConfig; NocoDB alone is bootstrap.
  */
 const SETTING_KEYS = [
+  'DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASSWORD',
   'PARENT_DOMAIN',
   'CORS_ORIGINS',
   'TYCHRON_SMS_URL',
@@ -44,15 +43,12 @@ function nocoStore() {
 
 /** No configured policy means trust nobody. Platform reads never fall back. */
 async function readTrustedCidr() {
-  const pinned = (process.env.IDENTITY_TRUSTED_NETWORK || '').trim();
-  if (pinned) return pinned;
   return (await nocoStore().get()).trustedCIDR || '';
 }
 
 async function refreshSettings() {
   try {
     const values = { ...(await nocoStore().get()) };
-    values.trustedCIDR = (process.env.IDENTITY_TRUSTED_NETWORK || '').trim() || values.trustedCIDR || '';
     cache = { at: Date.now(), settings: values };
     return values;
   } catch (error) {
