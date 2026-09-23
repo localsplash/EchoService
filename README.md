@@ -45,8 +45,8 @@ Bandwidth and Tychron call from their own networks, so the four webhook routes
 have to be reachable from the internet. They are the only routes that are, apart
 from `/ping` and `/healthz`:
 
-- `POST /webhooks/bandwidth/{inbound,status}`
-- `POST /webhooks/tychron/{sms,mms}`
+- `POST /v1/bandwidth/{inbound,status}`
+- `POST /v1/tychron/{sms,mms}`
 
 They authenticate themselves with basic auth from `WEBHOOK_BASIC_USER` and
 `WEBHOOK_BASIC_PASS` in PlatformConfig, and `webhookWatch` records every call so
@@ -62,7 +62,34 @@ The environment's proxy host needs to:
 - leave `TRUSTED_PROXIES` at its loopback default, so `X-Forwarded-For` from the
   proxy is ignored and no public request can be mistaken for a trusted one.
 
-Register each carrier's four webhook URLs against that hostname.
+Use [`deploy/nginx/webhook.echo.X.TLD.conf`](deploy/nginx/webhook.echo.X.TLD.conf)
+as the proxy-host template, substituting the parent domain and certificate paths.
+It forwards only `/v1/` and `/ping` to `echo-service:8080`; other paths
+return 404 at the edge. Register the four URLs with their respective carriers.
+
+### Tychron settings
+
+`TYCHRON_SMS_URL` and `TYCHRON_MMS_URL` belong in PlatformConfig, resolved in
+scope order `*` < `echo` < `echo-service`. Defaults follow Tychron's messaging
+OpenAPI specifications: `https://sms.tychron.online/sms` and
+`https://mms.tychron.online/api/v1/mms`. The Atlas base
+`https://api.atlas.tychron.online/api/v1/` is the provisioning API; its live
+OpenAPI contract has no SMS/MMS send routes. Do not append messaging paths to it.
+See the [SMS specification](https://docs.tychron.com/openapi/sms.openapi.yaml),
+[MMS specification](https://docs.tychron.com/openapi/mms.openapi.yaml), and
+[Atlas scope](https://docs.tychron.com/llms-full.txt).
+
+Each carrier application's `jsonSettings` needs only its own `apiToken`.
+Optional `smsUrl`/`mmsUrl` application overrides take precedence for staging.
+The private carrier-applications response includes the effective platform
+endpoints so EchoWeb can display them without maintaining a second default.
+
+For every tenant number, configure its Tychron Switch to deliver SMS/MMS and
+status reports to `https://webhook.echo.X.TLD/v1/tychron/{sms,mms}` with
+`WEBHOOK_BASIC_USER` and `WEBHOOK_BASIC_PASS` from PlatformConfig. Bandwidth uses
+`/v1/bandwidth/{inbound,status}` on the same hostname. `/v1` is carrier ingress
+only; the private `/api` remains unversioned. The former `/webhooks/*` routes
+are removed with no aliases: update registrations when deploying this change.
 
 ## Endpoints
 
@@ -72,7 +99,7 @@ Register each carrier's four webhook URLs against that hostname.
 - `POST /api/conversations/:customer/send` — outbound SMS/MMS
 - `GET|POST|PUT /api/carriers`, `/api/carrier-applications`, `/api/business-phones`
 - `POST /api/media/obtain[/:messageId]` — fetch provider-hosted media
-- `POST /webhooks/bandwidth/{inbound,status}`, `/webhooks/tychron/{sms,mms}`
+- `POST /v1/bandwidth/{inbound,status}`, `/v1/tychron/{sms,mms}`
 
 ## Configuration
 
@@ -94,7 +121,14 @@ A failed runtime refresh clears settings and causes the settings gate to return
 expired snapshot. `/ping` remains independent of configuration. `/health` checks the application
 database behind the network/settings gates.
 
-Runtime keys are `CORS_ORIGINS`, `WEBHOOK_BASIC_USER`, `WEBHOOK_BASIC_PASS`,
+Browser origins must match an entry in the comma-separated `CORS_ORIGINS` row
+or `https://echo.<PARENT_DOMAIN>` exactly. There are no implicit production,
+`.local`, `.test`, `.internal`, or localhost allowances. Add development origins
+explicitly in PlatformConfig. Requests without an Origin header still pass CORS;
+the network and authentication gates apply independently. Before deployment,
+verify the environment's `PARENT_DOMAIN` or `CORS_ORIGINS` row is populated.
+
+Runtime keys are `PARENT_DOMAIN`, `CORS_ORIGINS`, `WEBHOOK_BASIC_USER`, `WEBHOOK_BASIC_PASS`,
 `BANDWIDTH_ACCOUNT_ID`, `BANDWIDTH_API_TOKEN`, `BANDWIDTH_API_SECRET`,
 `BANDWIDTH_APPLICATION_ID`, and `BANDWIDTH_MESSAGING_API_BASE_URL`. These come
 only from PlatformConfig; a same-named environment variable is ignored, so a

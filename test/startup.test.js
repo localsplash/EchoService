@@ -18,6 +18,8 @@ async function fixture(t, missing = false) {
       ? [{ id: 'base', title: 'PlatformConfig' }]
       : req.url.endsWith('/tables') ? [{ id: 'table', title: 'cfg_tbl_Setting' }]
       : [
+        { app: '*', settingKey: 'PARENT_DOMAIN', settingValue: 'example.org' },
+        { app: 'echo-service', settingKey: 'CORS_ORIGINS', settingValue: 'https://operator.example.net, http://localhost:3160' },
         { app: '*', settingKey: 'trustedCIDR', settingValue: '10.0.0.0/8' },
         { app: 'echo-service', settingKey: 'WEBHOOK_BASIC_USER', settingValue: 'test-user' },
         { app: 'echo-service', settingKey: 'WEBHOOK_BASIC_PASS', settingValue: 'test-pass' },
@@ -64,11 +66,29 @@ test('real service starts from PlatformConfig without SQL settings and applies s
     assert.equal(health.status, 200);
     assert.deepEqual(await health.json(), { message: 'pong', service: 'EchoService', ...require('../src/buildInfo') });
   }
-  const denied = await fetch(`${origin}/webhooks/bandwidth/inbound`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '[]' });
+  for (const path of ['/v1/bandwidth/status', '/v1/tychron/sms', '/v1/tychron/mms']) {
+    const response = await fetch(origin + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    assert.equal(response.status, 401, path);
+  }
+  for (const path of ['/webhooks/bandwidth/inbound', '/webhooks/tychron/sms', '/v1/unrelated/action', '/api/carrier-applications']) {
+    const response = await fetch(origin + path, { method: 'POST' });
+    assert.equal(response.status, 403, path);
+  }
+  const denied = await fetch(`${origin}/v1/bandwidth/inbound`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '[]' });
   assert.equal(denied.status, 401);
-  const accepted = await fetch(`${origin}/webhooks/bandwidth/inbound`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Basic ${Buffer.from('test-user:test-pass').toString('base64')}` }, body: '[]' });
+  const accepted = await fetch(`${origin}/v1/bandwidth/inbound`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Basic ${Buffer.from('test-user:test-pass').toString('base64')}` }, body: '[]' });
   assert.equal(accepted.status, 200);
   assert.equal((await accepted.json()).ok, true);
+  for (const allowed of ['https://echo.example.org', 'https://operator.example.net', 'http://localhost:3160']) {
+    const response = await fetch(`${origin}/v1/bandwidth/inbound`, { method: 'OPTIONS', headers: { Origin: allowed, 'Access-Control-Request-Method': 'POST' } });
+    assert.equal(response.status, 204);
+    assert.equal(response.headers.get('access-control-allow-origin'), allowed);
+  }
+  for (const blocked of ['https://wisp.net', 'https://echo.wisp.net', 'https://unknown.local', 'https://unknown.test', 'https://unknown.internal', 'http://localhost:9999', 'https://echo.example.org.attacker.test']) {
+    const response = await fetch(`${origin}/v1/bandwidth/inbound`, { method: 'OPTIONS', headers: { Origin: blocked, 'Access-Control-Request-Method': 'POST' } });
+    assert.equal(response.headers.get('access-control-allow-origin'), null);
+    assert.notEqual(response.status, 204);
+  }
   assert.equal(f.requests.length, 3);
 });
 
