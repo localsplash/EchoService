@@ -1,0 +1,23 @@
+# Opt-in overlay: joins EchoService to an existing external reverse-proxy
+# network so the proxy can reach it by container name and the carriers can
+# deliver their webhooks. Enable it per environment, in .env:
+#
+#   COMPOSE_FILE=compose.yaml:compose.proxy.yaml
+#
+# An environment with no carrier registration of its own uses compose.yaml
+# alone and stays entirely on the private network. No host port is published
+# either way: the proxy terminates TLS and forwards to port 8080.
+#
+# What this exposes, and what it does not: /ping and /healthz answer anyone,
+# and the four carrier webhooks authenticate themselves (basic auth, from
+# PlatformConfig). Every other route is refused unless the caller is inside
+# the `trustedCIDR` row, which a request arriving through the proxy is not.
+# See "Carrier webhook ingress" in README.md for the proxy host requirements.
+services:
+  echo-service:
+    networks: [echo, proxy]
+
+networks:
+  proxy:
+    name: ${ECHO_PROXY_NETWORK:-npm_network}
+    external: true
