@@ -28,11 +28,16 @@ services:
     build:
       context: .
       args:
-        BUILD_REVISION: ${BUILD_REVISION:?Export Git HEAD before building}
-        SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:?Export Git committer epoch before building}
-        BUILD_DIRTY: ${BUILD_DIRTY:?Export Git dirty state before building}
+        # An environment that `include:`s several repos shares one variable
+        # namespace, so the stamp is per service: ECHO_SERVICE_* wins, and the
+        # unprefixed names remain for a single-repo build (what
+        # docker-container-control exports for the folder it deploys). Set one
+        # of the two, or the image carries no revision and /healthz says so.
+        BUILD_REVISION: ${ECHO_SERVICE_REVISION:-${BUILD_REVISION-}}
+        SOURCE_DATE_EPOCH: ${ECHO_SERVICE_EPOCH:-${SOURCE_DATE_EPOCH-0}}
+        BUILD_DIRTY: ${ECHO_SERVICE_DIRTY:-${BUILD_DIRTY-true}}
       labels:
-        org.opencontainers.image.revision: ${BUILD_REVISION:?}
+        org.opencontainers.image.revision: ${ECHO_SERVICE_REVISION:-${BUILD_REVISION-}}
         org.opencontainers.image.source: https://github.com/localsplash/EchoService
     image: echo-service:${ECHO_SERVICE_TAG:-dev}
     container_name: ${ECHO_SERVICE_CONTAINER_NAME:-echo-service}
