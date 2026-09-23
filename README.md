@@ -11,9 +11,58 @@ npm start
 
 ## Docker
 
+A throwaway local instance, with its own volumes and a loopback port:
+
 ```bash
-docker compose up -d --build
+docker compose -f compose.dev.yaml up -d --build
 ```
+
+An environment deploys the service from `compose.yaml`, which defines only this
+service and takes every name from the environment (see `.env.example`):
+
+```yaml
+include:
+  - EchoService/compose.yaml
+```
+
+### Deployment networks
+
+| Network | Who is on it | Why |
+| --- | --- | --- |
+| `ECHO_NETWORK` | EchoWeb, MySQL, NocoDB, EchoMedia | Where EchoWeb calls this service. Normally an internal network, so the service has no internet route by default. |
+| `ECHO_PROXY_NETWORK` | the reverse proxy | Added by `compose.proxy.yaml`, for carrier webhook ingress. It also gives the service its internet route, which is what lets it deliver to Bandwidth and Tychron. |
+
+Enable the overlay in the environment's `.env`; leave the line out where no
+carrier delivers to that environment:
+
+```
+COMPOSE_FILE=compose.yaml:compose.proxy.yaml
+```
+
+### Carrier webhook ingress
+
+Bandwidth and Tychron call from their own networks, so the four webhook routes
+have to be reachable from the internet. They are the only routes that are, apart
+from `/ping` and `/healthz`:
+
+- `POST /webhooks/bandwidth/{inbound,status}`
+- `POST /webhooks/tychron/{sms,mms}`
+
+They authenticate themselves with basic auth from `WEBHOOK_BASIC_USER` and
+`WEBHOOK_BASIC_PASS` in PlatformConfig, and `webhookWatch` records every call so
+a silent carrier stays visible. Everything else is refused unless the caller is
+inside the `trustedCIDR` row, which a request arriving through the proxy is not,
+so the API cannot be reached from the public side.
+
+The environment's proxy host needs to:
+
+- publish one hostname for this service (for example `webhook.echo.X.TLD`) and
+  forward it to port `8080` — no host port is published;
+- allow request bodies up to `10m`, since MMS payloads arrive inline;
+- leave `TRUSTED_PROXIES` at its loopback default, so `X-Forwarded-For` from the
+  proxy is ignored and no public request can be mistaken for a trusted one.
+
+Register each carrier's four webhook URLs against that hostname.
 
 ## Endpoints
 
@@ -79,8 +128,7 @@ revision with service-owned NocoDB credentials, then apply EchoDatabase migratio
 
 Verify effective `*`, `echo`, `echo-service` values, database connectivity,
 webhook authentication, network-policy gates, inbound/outbound SMS/MMS, media,
-and settings failure/recovery in the running Dev deployment. Record the exact
-versions and results in [EchoOrchestrator #11](https://github.com/localsplash/EchoOrchestrator/issues/11).
+and settings failure/recovery in the running Dev deployment.
 Active `sms_*` tables and the migration ledger remain in use.
 
 Asterisk/OfficePulse own PBX extensions, queues, memberships, trunks, and

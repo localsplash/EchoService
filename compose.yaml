@@ -1,0 +1,82 @@
+# EchoService as an environment deploys it, for an environment's own Compose
+# file:
+#
+#   include:
+#     - EchoService/compose.yaml
+#
+# Only this service is defined here, with no environment values: the database,
+# NocoDB, network and volume names all come from the environment (see
+# .env.example). For a throwaway local instance use compose.dev.yaml instead.
+#
+# Two networks, because this service has two very different callers:
+#
+#   echo   private, and normally internal (no internet route). EchoWeb, MySQL
+#          and NocoDB live here. Everything except /ping, /healthz and the
+#          carrier webhooks is refused unless the caller is inside the
+#          PlatformConfig `trustedCIDR` row, so this is where EchoWeb calls it.
+#   proxy  added by compose.proxy.yaml, for carrier webhook ingress — see
+#          "Carrier webhook ingress" in README.md. Joining it also gives this
+#          service an internet route, which is what lets it deliver messages
+#          to Bandwidth and Tychron.
+#
+# Enable the overlay per environment, in .env:
+#
+#   COMPOSE_FILE=compose.yaml:compose.proxy.yaml
+
+services:
+  echo-service:
+    build:
+      context: .
+      args:
+        BUILD_REVISION: ${BUILD_REVISION:?Export Git HEAD before building}
+        SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:?Export Git committer epoch before building}
+        BUILD_DIRTY: ${BUILD_DIRTY:?Export Git dirty state before building}
+      labels:
+        org.opencontainers.image.revision: ${BUILD_REVISION:?}
+        org.opencontainers.image.source: https://github.com/localsplash/EchoService
+    image: echo-service:${ECHO_SERVICE_TAG:-dev}
+    container_name: ${ECHO_SERVICE_CONTAINER_NAME:-echo-service}
+    environment:
+      TZ: ${TZ:-America/Los_Angeles}
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: "8080"
+      MEDIA_ROOT: /media
+      # Bootstrap only. Runtime settings, including the carrier credentials and
+      # the webhook basic-auth pair, come from PlatformConfig.
+      DB_HOST: ${DB_HOST:?the MySQL host}
+      DB_PORT: ${DB_PORT:-3306}
+      DB_NAME: ${DB_NAME:-echo_db}
+      DB_USER: ${DB_USER:-echo_service}
+      DB_PASSWORD: ${DB_PASSWORD:?the echo_service password}
+      NOCODB_BASE_URL: ${NOCODB_BASE_URL:?the PlatformConfig NocoDB URL}
+      NOCODB_API_TOKEN: ${NOCODB_API_TOKEN:?this service's own NocoDB token}
+      # Deployment network policy, not a setting. With a reverse proxy in
+      # front, leave this at the loopback default so X-Forwarded-For is
+      # ignored and no public request can be taken for a trusted one.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-127.0.0.1/32}
+    volumes:
+      - media:/media:ro
+      - logs:/var/log/echo
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+    networks:
+      - echo
+    logging:
+      driver: json-file
+      options:
+        max-size: ${LOG_MAX_SIZE:-10m}
+        max-file: ${LOG_MAX_FILE:-"3"}
+    restart: unless-stopped
+
+volumes:
+  media:
+    name: ${ECHO_MEDIA_VOLUME:?the shared media volume, written by EchoMedia}
+    external: true
+  logs:
+    name: ${ECHO_SERVICE_LOGS_VOLUME:?the log volume, kept across rebuilds}
+    external: true
+
+networks:
+  echo:
+    name: ${ECHO_NETWORK:?the private network EchoWeb, MySQL and NocoDB are on}
+    external: true
