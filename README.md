@@ -134,22 +134,29 @@ Runtime keys are `PARENT_DOMAIN`, `CORS_ORIGINS`, `WEBHOOK_BASIC_USER`, `WEBHOOK
 only from PlatformConfig; a same-named environment variable is ignored, so a
 rotated row always takes effect. The shared
 `trustedCIDR` policy belongs in global scope `*`; `IDENTITY_TRUSTED_NETWORK`
-remains an explicit deployment override. The API policy is loaded at startup
+is retired and ignored. The API policy is loaded at startup
 and on operator reload; its established policy is retained after a failed policy
 reload. The runtime settings gate still refuses requests after a failed settings
 refresh. This service never writes settings or network policy.
 
 | Deployment variable | Purpose |
 | --- | --- |
-| `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME` | Echo application database pool; retained as process bootstrap in this release |
 | `PORT` | Listener, default `8080` |
 | `MEDIA_ROOT` | Media mount path, default `/media`; match EchoMedia's shared mount |
 | `NOCODB_BASE_URL`, `NOCODB_API_TOKEN` | Service-specific settings-store bootstrap |
 | `TRUSTED_PROXIES` | Optional deployment proxy trust control |
 
-Database coordinates, ports, media paths and bootstrap credentials require a
-restart to change. They are deployment invariants, not hot-reloaded scoped
-settings. There is no dotenv loader: export variables for `npm start`; Compose
+`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, and secret `DB_PASSWORD` are
+PlatformConfig settings (`*` < `echo` < `echo-service`); environment pins are
+ignored. Without a `DB_HOST` row, the host derives as `lsdb.<PARENT_DOMAIN>`.
+The port defaults to 3306. Set DB_NAME and this service's own DB_USER explicitly.
+The MySQL pool opens on first use; missing coordinates give an actionable error
+while liveness stays available. Once a pool exists, coordinate edits require a
+restart. Store application credentials only; MySQL admin credentials stay with
+the operator's EchoDatabase migration/account jobs. Their application passwords
+must match the corresponding PlatformConfig rows.
+
+Ports, media paths and settings-store credentials also require restart. There is no dotenv loader: export variables for `npm start`; Compose
 forwards the variables in its environment block.
 
 ## Disposable Dev deployment

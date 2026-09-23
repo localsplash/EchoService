@@ -46,21 +46,16 @@ services:
       NODE_ENV: ${NODE_ENV:-production}
       PORT: "8080"
       MEDIA_ROOT: /media
-      # Bootstrap only. Runtime settings, including the carrier credentials and
-      # the webhook basic-auth pair, come from PlatformConfig.
-      DB_HOST: ${DB_HOST:?the MySQL host}
-      DB_PORT: ${DB_PORT:-3306}
-      DB_NAME: ${DB_NAME:-echo_db}
-      DB_USER: ${DB_USER:-echo_service}
-      DB_PASSWORD: ${DB_PASSWORD:?the echo_service password}
+      # Only the settings-store credentials are bootstrap. Database coordinates
+      # and carrier settings come from PlatformConfig.
       NOCODB_BASE_URL: ${NOCODB_BASE_URL:?the PlatformConfig NocoDB URL}
-      NOCODB_API_TOKEN: ${NOCODB_API_TOKEN:?this service's own NocoDB token}
+      NOCODB_API_TOKEN: ${ECHO_SERVICE_NOCODB_API_TOKEN:?this service NocoDB token}
       # Deployment network policy, not a setting. With a reverse proxy in
       # front, leave this at the loopback default so X-Forwarded-For is
       # ignored and no public request can be taken for a trusted one.
       TRUSTED_PROXIES: ${TRUSTED_PROXIES:-127.0.0.1/32}
     volumes:
-      - media:/media:ro
+      - media:/media
       - logs:/var/log/echo
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
@@ -75,7 +70,7 @@ services:
 
 volumes:
   media:
-    name: ${ECHO_MEDIA_VOLUME:?the shared media volume, written by EchoMedia}
+    name: ${ECHO_MEDIA_VOLUME:?the shared media volume, written by EchoService}
     external: true
   logs:
     name: ${ECHO_SERVICE_LOGS_VOLUME:?the log volume, kept across rebuilds}
