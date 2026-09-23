@@ -67,6 +67,33 @@ as the proxy-host template, substituting the parent domain and certificate paths
 It forwards only `/v1/` and `/ping` to `echo-service:8080`; other paths
 return 404 at the edge. Register the four URLs with their respective carriers.
 
+### Carrier cutover URLs
+
+Replace `X.TLD` with this environment's `PARENT_DOMAIN`. Give the carriers these
+complete HTTPS URLs, all using `POST`:
+
+| Carrier configuration | Webhook URL | Events received |
+| --- | --- | --- |
+| Bandwidth incoming-message callback | `https://webhook.echo.X.TLD/v1/bandwidth/inbound` | Incoming SMS/MMS |
+| Bandwidth outgoing-message callback | `https://webhook.echo.X.TLD/v1/bandwidth/status` | Outbound message status/delivery events |
+| Tychron Switch SMS callback | `https://webhook.echo.X.TLD/v1/tychron/sms` | Incoming SMS and SMS delivery reports |
+| Tychron Switch MMS callback | `https://webhook.echo.X.TLD/v1/tychron/mms` | Incoming MMS and MMS delivery reports |
+
+Configure HTTP Basic authentication on every callback using the effective
+`WEBHOOK_BASIC_USER` and secret `WEBHOOK_BASIC_PASS` settings (`*` < `echo` <
+`echo-service`). Set them in the carrier's authentication fields; do not embed
+credentials in the URLs. Configure Tychron's Switch for each tenant's numbers.
+
+Before registering the URLs, provision the hostname and its TLS certificate,
+forward `/v1/` and `/ping` to `echo-service:8080`, and verify HTTPS
+`GET /ping` returns 200. An unauthenticated POST from outside `trustedCIDR` to
+each callback should return 401. Then register the callbacks and verify real
+inbound messages and outbound delivery reports with the carrier credentials.
+The old `/webhooks/*` paths have no forwarding aliases.
+
+These are callbacks **into Echo**, distinct from Tychron's outbound SMS/MMS
+send endpoints documented below.
+
 ### Tychron settings
 
 `TYCHRON_SMS_URL` and `TYCHRON_MMS_URL` belong in PlatformConfig, resolved in
