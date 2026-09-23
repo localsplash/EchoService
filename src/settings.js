@@ -18,7 +18,10 @@ const {
  * readTrustedCidr(), not a runtime setting. Leave it where it is.
  */
 const SETTING_KEYS = [
+  'PARENT_DOMAIN',
   'CORS_ORIGINS',
+  'TYCHRON_SMS_URL',
+  'TYCHRON_MMS_URL',
   'WEBHOOK_BASIC_USER',
   'WEBHOOK_BASIC_PASS',
   'BANDWIDTH_ACCOUNT_ID',

@@ -25,6 +25,7 @@ const {
 const { sourceNames } = require('./nocoSettings');
 const {
   sendTychronMessage,
+  tychronEndpoints,
   extractMmsParts,
   mapSmsStatus,
   mapMmsStatus,
@@ -52,14 +53,6 @@ const upload = multer({
 
 const app = express();
 const port = process.env.PORT || 8080;
-
-/** Runtime configuration uses PlatformConfig by default; see settings.js. */
-function explicitOrigins() {
-  return (settings().CORS_ORIGINS || '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
 
 /** Database pool coordinates stay process bootstrap; changes require restart. */
 function poolCoordinates() {
@@ -94,20 +87,11 @@ function echoDb() {
 
 function isAllowedOrigin(origin) {
   if (!origin) return true;
-  try {
-    const u = new URL(origin);
-    const host = u.hostname.toLowerCase();
-    const isLocal = host === 'localhost' || host === '127.0.0.1';
-    const isWisp = host === 'wisp.net' || host.endsWith('.wisp.net');
-    const isDevUi = host.endsWith('.local') || host.endsWith('.test') || host.endsWith('.internal');
-    if (isLocal) return true;
-    if (isWisp) return true;
-    if (isDevUi) return true;
-    if (explicitOrigins().includes(origin)) return true;
-    return false;
-  } catch {
-    return false;
-  }
+  const config = settings();
+  const origins = (config.CORS_ORIGINS || '').split(',').map((value) => value.trim()).filter(Boolean);
+  const parentDomain = (config.PARENT_DOMAIN || '').trim();
+  if (parentDomain) origins.push(`https://echo.${parentDomain}`);
+  return origins.includes(origin);
 }
 
 function requireWebhookBasicAuth(req, res, next) {
@@ -121,7 +105,7 @@ function requireWebhookBasicAuth(req, res, next) {
   // Manager every request arrives from the proxy's own address on the Docker
   // network, which falls inside the 172.16.0.0/12 entry of trustedCIDR. The
   // peer check therefore passed for *every* caller and this basic auth was not
-  // enforced at all — `curl -X POST https://<host>/webhooks/tychron/sms` with
+  // enforced at all — `curl -X POST https://<host>/v1/tychron/sms` with
   // no credentials answered 204 and could write fabricated inbound messages
   // straight into the database. See trust.js `clientIp`.
   if (clientInTrustedNetwork(req, settings().trustedCIDR, trustedProxies())) return next();
@@ -592,7 +576,7 @@ mountPolicy(app);
 /**
  * Routes that answer from outside the trusted network, and why each one must.
  *
- *   - `/webhooks/` — Tychron and Bandwidth call from their own networks. Behind
+ *   - `/v1/` — Tychron and Bandwidth call from their own networks. Behind
  *     the gate the inbound message path would close permanently. They keep
  *     basic auth, and webhookWatch records every call including the refused
  *     ones, so a carrier going quiet stays visible.
@@ -604,7 +588,7 @@ mountPolicy(app);
  * refused unless the caller is inside trustedCIDR. Before this, all of it was
  * readable by anyone who knew the hostname.
  */
-const OPEN_TO_ANY_NETWORK = [/^\/webhooks\//, /^\/ping$/, /^\/api\/policy/];
+const OPEN_TO_ANY_NETWORK = [/^\/v1\/(bandwidth|tychron)\//, /^\/ping$/, /^\/api\/policy/];
 
 app.use((req, res, next) => {
   if (OPEN_TO_ANY_NETWORK.some((pattern) => pattern.test(req.path))) return next();
@@ -873,7 +857,7 @@ app.post('/api/conversations/:customer/send', async (req, res) => {
     // them inline do not share a useful middle.
     if (Number(phoneRecord?.eCarrierId) === CARRIER_TYCHRON) {
       return await sendViaTychron({
-        res, business, customer, text, draftMediaIds, settings: carrierSettings
+        res, business, customer, text, draftMediaIds, settings: { ...carrierSettings, applicationName: phoneRecord.carrierApplicationName }
       });
     }
 
@@ -990,7 +974,7 @@ app.get('/api/carriers', async (_req, res, next) => {
 app.get('/api/carrier-applications', async (_req, res, next) => {
   try {
     const items = await getCarrierApplications(null);
-    res.json({ items });
+    res.json({ items, tychronEndpoints: tychronEndpoints() });
   } catch (error) {
     next(error);
   }
@@ -1353,14 +1337,14 @@ const watchTychron = webhookWatch.watch('tychron', trustedProxies());
 const watchBandwidth = webhookWatch.watch('bandwidth', trustedProxies());
 
 
-app.post('/webhooks/bandwidth/inbound', watchBandwidth, requireWebhookBasicAuth, async (req, res) => {
+app.post('/v1/bandwidth/inbound', watchBandwidth, requireWebhookBasicAuth, async (req, res) => {
   if (!Array.isArray(req.body)) {
     return res.status(400).json({ ok: false, error: 'Payload must be an array' });
   }
   return res.json(await processBandwidthEvents(req.body));
 });
 
-app.post('/webhooks/bandwidth/status', watchBandwidth, requireWebhookBasicAuth, async (req, res) => {
+app.post('/v1/bandwidth/status', watchBandwidth, requireWebhookBasicAuth, async (req, res) => {
   if (!Array.isArray(req.body)) {
     return res.status(400).json({ ok: false, error: 'Payload must be an array' });
   }
@@ -1380,7 +1364,7 @@ app.post('/webhooks/bandwidth/status', watchBandwidth, requireWebhookBasicAuth, 
 //      it is retried forever; and a transient fault must *not* be, so that it
 //      comes back once the fault clears.
 
-app.post('/webhooks/tychron/sms', watchTychron, requireWebhookBasicAuth, async (req, res) => {
+app.post('/v1/tychron/sms', watchTychron, requireWebhookBasicAuth, async (req, res) => {
   try {
     const result = await processTychronSmsWebhook(req.body);
     if (!result.ok) {
@@ -1393,7 +1377,7 @@ app.post('/webhooks/tychron/sms', watchTychron, requireWebhookBasicAuth, async (
   return res.sendStatus(204); // never a body: a body would be sent to the customer
 });
 
-app.post('/webhooks/tychron/mms', watchTychron, requireWebhookBasicAuth, async (req, res) => {
+app.post('/v1/tychron/mms', watchTychron, requireWebhookBasicAuth, async (req, res) => {
   try {
     const result = await processTychronMmsWebhook(req.body);
     if (!result.ok) {

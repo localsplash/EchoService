@@ -27,6 +27,7 @@
  */
 
 const path = require('path');
+const { settings: platformSettings } = require('./settings');
 const { extensionForMime } = require('./mediaObtain');
 
 /** Tychron's documented body cap for a single SMS. */
@@ -63,10 +64,27 @@ function requireSetting(settings, key) {
   const value = settings && settings[key];
   if (!value) {
     throw new Error(
-      `Tychron ${key} is not set on this carrier application — add it in Settings → Carrier Applications`
+      `No Tychron API key on carrier application ${settings?.applicationName || '(unnamed)'} — add it in Settings → Carrier Applications`
     );
   }
   return value;
+}
+
+/** Atlas is provisioning; messaging has separate SMS and MMS endpoints. */
+function tychronEndpoints(application = {}, platform = platformSettings()) {
+  const endpoint = (key, platformKey, fallback) => {
+    const value = String(application?.[key] || platform[platformKey] || fallback).trim();
+    let url;
+    try { url = new URL(value); } catch { /* report the key, never credentials */ }
+    if (!url || !['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+      throw new Error(`Invalid Tychron endpoint: ${application?.[key] ? `carrier application ${key}` : platformKey}`);
+    }
+    return value;
+  };
+  return {
+    smsUrl: endpoint('smsUrl', 'TYCHRON_SMS_URL', 'https://sms.tychron.online/sms'),
+    mmsUrl: endpoint('mmsUrl', 'TYCHRON_MMS_URL', 'https://mms.tychron.online/api/v1/mms'),
+  };
 }
 
 /**
@@ -89,8 +107,8 @@ async function sendTychronMessage({ from, to, text, attachments, settings }) {
  * @returns {Promise<{ id: string, parts: string[], raw: object }>}
  */
 async function sendTychronSms({ from, to, text, settings }) {
-  const url = requireSetting(settings, 'smsUrl');
   requireSetting(settings, 'apiToken');
+  const url = tychronEndpoints(settings).smsUrl;
 
   if (text.length > MAX_SMS_BODY_CHARS) {
     throw new Error(
@@ -167,8 +185,8 @@ function recipientRecord(data, to) {
  * @returns {Promise<{ id: string, parts: string[], raw: object }>}
  */
 async function sendTychronMms({ from, to, text, attachments, settings }) {
-  const url = requireSetting(settings, 'mmsUrl');
   requireSetting(settings, 'apiToken');
+  const url = tychronEndpoints(settings).mmsUrl;
 
   const parts = [];
 
@@ -385,6 +403,7 @@ function tychronStatusDescription(status, code) {
 }
 
 module.exports = {
+  tychronEndpoints,
   sendTychronMessage,
   sendTychronSms,
   sendTychronMms,
