@@ -64,6 +64,11 @@ The environment's proxy host needs to:
 
 Use [`deploy/nginx/webhook.echo.X.TLD.conf`](deploy/nginx/webhook.echo.X.TLD.conf)
 as the proxy-host template, substituting the parent domain and certificate paths.
+EchoWeb calls `http://echo-service-private:8080`, a DNS name registered only
+on the private network by `compose.yaml`. This keeps internal API requests
+inside `trustedCIDR` even when both services also join the proxy network.
+The proxy uses the ordinary `echo-service` name on its own network.
+
 It forwards only `/v1/` and `/ping` to `echo-service:8080`; other paths
 return 404 at the edge. Register the four URLs with their respective carriers.
 

@@ -60,7 +60,10 @@ services:
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
     networks:
-      - echo
+      echo:
+        # The service name also resolves on the optional proxy network.
+        # Internal callers must use this name to stay inside trustedCIDR.
+        aliases: [echo-service-private]
     logging:
       driver: json-file
       options:
