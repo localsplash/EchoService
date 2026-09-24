@@ -15,7 +15,9 @@
 # See "Carrier webhook ingress" in README.md for the proxy host requirements.
 services:
   echo-service:
-    networks: [echo, proxy]
+    networks:
+      echo: {}
+      proxy: {}
 
 networks:
   proxy:
