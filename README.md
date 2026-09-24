@@ -48,8 +48,8 @@ from `/ping` and `/healthz`:
 - `POST /v1/bandwidth/{inbound,status}`
 - `POST /v1/tychron/{sms,mms}`
 
-They authenticate themselves with basic auth from `WEBHOOK_BASIC_USER` and
-`WEBHOOK_BASIC_PASS` in PlatformConfig, and `webhookWatch` records every call so
+They authenticate themselves with carrier-specific Basic Auth from PlatformConfig
+(see the credential table below), and `webhookWatch` records every call so
 a silent carrier stays visible. Everything else is refused unless the caller is
 inside the `trustedCIDR` row, which a request arriving through the proxy is not,
 so the API cannot be reached from the public side.
@@ -87,9 +87,25 @@ complete HTTPS URLs, all using `POST`:
 | Tychron Switch SMS callback | `https://echo-webhook.X.TLD/v1/tychron/sms` | Incoming SMS and SMS delivery reports |
 | Tychron Switch MMS callback | `https://echo-webhook.X.TLD/v1/tychron/mms` | Incoming MMS and MMS delivery reports |
 
-Configure HTTP Basic authentication on every callback using the effective
-`WEBHOOK_BASIC_USER` and secret `WEBHOOK_BASIC_PASS` settings (`*` < `echo` <
-`echo-service`). Set them in the carrier's authentication fields; do not embed
+Configure HTTP Basic authentication on every callback using its carrier's pair
+in the `echo-service` PlatformConfig scope (resolution: `*` < `echo` < `echo-service`):
+
+| Carrier | Username setting | Secret password setting |
+| --- | --- | --- |
+| Bandwidth | `BANDWIDTH_WEBHOOK_BASIC_USER` | `BANDWIDTH_WEBHOOK_BASIC_PASS` |
+| Tychron | `TYCHRON_WEBHOOK_BASIC_USER` | `TYCHRON_WEBHOOK_BASIC_PASS` |
+
+Each pair applies only to that carrier's `/v1/` routes and rotates independently.
+These are inbound credentials, separate from outbound carrier API keys. Changes
+take effect within 30 seconds without a restart. If both fields for a carrier
+are blank, its external callbacks are unauthenticated; trusted-network callers
+retain their existing bypass.
+
+When upgrading from shared credentials, copy the effective `WEBHOOK_BASIC_USER`
+and `WEBHOOK_BASIC_PASS` into both carrier pairs before deploying, then delete
+the old rows. The shared keys are no longer read.
+
+Set the pair in the carrier's authentication fields; do not embed
 credentials in the URLs. Configure Tychron's Switch for each tenant's numbers.
 
 Before registering the URLs, provision the hostname and its TLS certificate,
@@ -121,7 +137,7 @@ endpoints so EchoWeb can display them without maintaining a second default.
 
 For every tenant number, configure its Tychron Switch to deliver SMS/MMS and
 status reports to `https://echo-webhook.X.TLD/v1/tychron/{sms,mms}` with
-`WEBHOOK_BASIC_USER` and `WEBHOOK_BASIC_PASS` from PlatformConfig. Bandwidth uses
+`TYCHRON_WEBHOOK_BASIC_USER` and `TYCHRON_WEBHOOK_BASIC_PASS` from PlatformConfig. Bandwidth uses
 `/v1/bandwidth/{inbound,status}` on the same hostname. `/v1` is carrier ingress
 only; the private `/api` remains unversioned. The former `/webhooks/*` routes
 are removed with no aliases: update registrations when deploying this change.
@@ -163,7 +179,8 @@ explicitly in PlatformConfig. Requests without an Origin header still pass CORS;
 the network and authentication gates apply independently. Before deployment,
 verify the environment's `PARENT_DOMAIN` or `CORS_ORIGINS` row is populated.
 
-Runtime keys are `PARENT_DOMAIN`, `CORS_ORIGINS`, `WEBHOOK_BASIC_USER`, `WEBHOOK_BASIC_PASS`,
+Runtime keys are `PARENT_DOMAIN`, `CORS_ORIGINS`, `BANDWIDTH_WEBHOOK_BASIC_USER`, `BANDWIDTH_WEBHOOK_BASIC_PASS`,
+`TYCHRON_WEBHOOK_BASIC_USER`, `TYCHRON_WEBHOOK_BASIC_PASS`,
 `BANDWIDTH_ACCOUNT_ID`, `BANDWIDTH_API_TOKEN`, `BANDWIDTH_API_SECRET`,
 `BANDWIDTH_APPLICATION_ID`, and `BANDWIDTH_MESSAGING_API_BASE_URL`. These come
 only from PlatformConfig; a same-named environment variable is ignored, so a

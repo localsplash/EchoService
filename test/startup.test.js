@@ -23,6 +23,10 @@ async function fixture(t, missing = false) {
         { app: '*', settingKey: 'trustedCIDR', settingValue: '10.0.0.0/8' },
         { app: 'echo-service', settingKey: 'WEBHOOK_BASIC_USER', settingValue: 'test-user' },
         { app: 'echo-service', settingKey: 'WEBHOOK_BASIC_PASS', settingValue: 'test-pass' },
+        ...['BANDWIDTH', 'TYCHRON'].flatMap((carrier) => [
+          { app: 'echo-service', settingKey: `${carrier}_WEBHOOK_BASIC_USER`, settingValue: `${carrier}-user` },
+          { app: 'echo-service', settingKey: `${carrier}_WEBHOOK_BASIC_PASS`, settingValue: `${carrier}-pass` },
+        ]),
       ];
     res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify({ list, pageInfo: { isLastPage: true } }));
@@ -76,9 +80,31 @@ test('real service starts from PlatformConfig without SQL settings and applies s
   }
   const denied = await fetch(`${origin}/v1/bandwidth/inbound`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '[]' });
   assert.equal(denied.status, 401);
-  const accepted = await fetch(`${origin}/v1/bandwidth/inbound`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Basic ${Buffer.from('test-user:test-pass').toString('base64')}` }, body: '[]' });
+  const accepted = await fetch(`${origin}/v1/bandwidth/inbound`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Basic ${Buffer.from('BANDWIDTH-user:BANDWIDTH-pass').toString('base64')}` }, body: '[]' });
   assert.equal(accepted.status, 200);
   assert.equal((await accepted.json()).ok, true);
+  // Exercise all four real routes with distinct carrier credentials. Empty
+  // event payloads test authentication without touching a database or sending SMS.
+  for (const [carrier, paths, body, status] of [
+    ['BANDWIDTH', ['/v1/bandwidth/inbound', '/v1/bandwidth/status'], '[]', 200],
+    ['TYCHRON', ['/v1/tychron/sms', '/v1/tychron/mms'], '{}', 204],
+  ]) {
+    const other = carrier === 'BANDWIDTH' ? 'TYCHRON' : 'BANDWIDTH';
+    for (const path of paths) {
+      for (const [credentials, expected] of [
+        [`${carrier}-user:${carrier}-pass`, status],
+        [`${other}-user:${other}-pass`, 401],
+        [`${carrier}-user:wrong`, 401],
+        ['test-user:test-pass', 401], // retired shared credentials do not apply
+      ]) {
+        const response = await fetch(origin + path, {
+          method: 'POST', body,
+          headers: { 'Content-Type': 'application/json', Authorization: `Basic ${Buffer.from(credentials).toString('base64')}` },
+        });
+        assert.equal(response.status, expected, `${path}: ${credentials}`);
+      }
+    }
+  }
   for (const allowed of ['https://echo.example.org', 'https://operator.example.net', 'http://localhost:3160']) {
     const response = await fetch(`${origin}/v1/bandwidth/inbound`, { method: 'OPTIONS', headers: { Origin: allowed, 'Access-Control-Request-Method': 'POST' } });
     assert.equal(response.status, 204);

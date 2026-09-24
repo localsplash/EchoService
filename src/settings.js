@@ -9,7 +9,7 @@ const {
  *
  * A same-named environment variable is ignored. These used to be pinnable in
  * the environment, where a nonblank value won over the row — and because most
- * of them are credentials, a stale pin meant rotating WEBHOOK_BASIC_PASS or a
+ * of them are credentials, a stale pin meant rotating TYCHRON_WEBHOOK_BASIC_PASS or a
  * Bandwidth secret in the store appeared to work while the old value stayed in
  * force, with nothing on the host to say why.
  *
@@ -21,8 +21,10 @@ const SETTING_KEYS = [
   'CORS_ORIGINS',
   'TYCHRON_SMS_URL',
   'TYCHRON_MMS_URL',
-  'WEBHOOK_BASIC_USER',
-  'WEBHOOK_BASIC_PASS',
+  'BANDWIDTH_WEBHOOK_BASIC_USER',
+  'BANDWIDTH_WEBHOOK_BASIC_PASS',
+  'TYCHRON_WEBHOOK_BASIC_USER',
+  'TYCHRON_WEBHOOK_BASIC_PASS',
   'BANDWIDTH_ACCOUNT_ID',
   'BANDWIDTH_API_TOKEN',
   'BANDWIDTH_API_SECRET',
