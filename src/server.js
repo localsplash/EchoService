@@ -71,39 +71,41 @@ function isAllowedOrigin(origin) {
   return origins.includes(origin);
 }
 
-function requireWebhookBasicAuth(req, res, next) {
-  // A caller from inside the platform's own network is already trusted —
-  // that is what trustedCIDR names, one value shared by every application.
-  // Bandwidth reaches us from outside it, so basic auth stays the path for
-  // the provider's own webhooks.
-  //
-  // This has to resolve the client through the proxy rather than trusting the
-  // socket peer, and the difference was not academic: behind Nginx Proxy
-  // Manager every request arrives from the proxy's own address on the Docker
-  // network, which falls inside the 172.16.0.0/12 entry of trustedCIDR. The
-  // peer check therefore passed for *every* caller and this basic auth was not
-  // enforced at all — `curl -X POST https://<host>/v1/tychron/sms` with
-  // no credentials answered 204 and could write fabricated inbound messages
-  // straight into the database. See trust.js `clientIp`.
-  if (clientInTrustedNetwork(req, settings().trustedCIDR, trustedProxies())) return next();
+function requireWebhookBasicAuth(carrier) {
+  return function authenticateCarrierWebhook(req, res, next) {
+    // A caller from inside the platform's own network is already trusted —
+    // that is what trustedCIDR names, one value shared by every application.
+    // Bandwidth reaches us from outside it, so basic auth stays the path for
+    // the provider's own webhooks.
+    //
+    // This has to resolve the client through the proxy rather than trusting the
+    // socket peer, and the difference was not academic: behind Nginx Proxy
+    // Manager every request arrives from the proxy's own address on the Docker
+    // network, which falls inside the 172.16.0.0/12 entry of trustedCIDR. The
+    // peer check therefore passed for *every* caller and this basic auth was not
+    // enforced at all — `curl -X POST https://<host>/v1/tychron/sms` with
+    // no credentials answered 204 and could write fabricated inbound messages
+    // straight into the database. See trust.js `clientIp`.
+    if (clientInTrustedNetwork(req, settings().trustedCIDR, trustedProxies())) return next();
 
-  const webhookUser = settings().WEBHOOK_BASIC_USER || '';
-  const webhookPass = settings().WEBHOOK_BASIC_PASS || '';
-  if (!webhookUser && !webhookPass) return next();
-  const header = req.headers.authorization || '';
-  if (!header.startsWith('Basic ')) {
-    res.set('WWW-Authenticate', 'Basic realm="EchoService Webhook"');
-    return res.status(401).json({ ok: false, error: 'Missing basic auth' });
-  }
-  const decoded = Buffer.from(header.slice(6), 'base64').toString('utf8');
-  const idx = decoded.indexOf(':');
-  const user = idx >= 0 ? decoded.slice(0, idx) : decoded;
-  const pass = idx >= 0 ? decoded.slice(idx + 1) : '';
-  if (user !== webhookUser || pass !== webhookPass) {
-    res.set('WWW-Authenticate', 'Basic realm="EchoService Webhook"');
-    return res.status(401).json({ ok: false, error: 'Invalid basic auth' });
-  }
-  return next();
+    const webhookUser = settings()[`${carrier}_WEBHOOK_BASIC_USER`] || '';
+    const webhookPass = settings()[`${carrier}_WEBHOOK_BASIC_PASS`] || '';
+    if (!webhookUser && !webhookPass) return next();
+    const header = req.headers.authorization || '';
+    if (!header.startsWith('Basic ')) {
+      res.set('WWW-Authenticate', 'Basic realm="EchoService Webhook"');
+      return res.status(401).json({ ok: false, error: 'Missing basic auth' });
+    }
+    const decoded = Buffer.from(header.slice(6), 'base64').toString('utf8');
+    const idx = decoded.indexOf(':');
+    const user = idx >= 0 ? decoded.slice(0, idx) : decoded;
+    const pass = idx >= 0 ? decoded.slice(idx + 1) : '';
+    if (user !== webhookUser || pass !== webhookPass) {
+      res.set('WWW-Authenticate', 'Basic realm="EchoService Webhook"');
+      return res.status(401).json({ ok: false, error: 'Invalid basic auth' });
+    }
+    return next();
+  };
 }
 
 function normalizeUs10(value) {
@@ -1314,14 +1316,14 @@ const watchTychron = webhookWatch.watch('tychron', trustedProxies());
 const watchBandwidth = webhookWatch.watch('bandwidth', trustedProxies());
 
 
-app.post('/v1/bandwidth/inbound', watchBandwidth, requireWebhookBasicAuth, async (req, res) => {
+app.post('/v1/bandwidth/inbound', watchBandwidth, requireWebhookBasicAuth('BANDWIDTH'), async (req, res) => {
   if (!Array.isArray(req.body)) {
     return res.status(400).json({ ok: false, error: 'Payload must be an array' });
   }
   return res.json(await processBandwidthEvents(req.body));
 });
 
-app.post('/v1/bandwidth/status', watchBandwidth, requireWebhookBasicAuth, async (req, res) => {
+app.post('/v1/bandwidth/status', watchBandwidth, requireWebhookBasicAuth('BANDWIDTH'), async (req, res) => {
   if (!Array.isArray(req.body)) {
     return res.status(400).json({ ok: false, error: 'Payload must be an array' });
   }
@@ -1341,7 +1343,7 @@ app.post('/v1/bandwidth/status', watchBandwidth, requireWebhookBasicAuth, async 
 //      it is retried forever; and a transient fault must *not* be, so that it
 //      comes back once the fault clears.
 
-app.post('/v1/tychron/sms', watchTychron, requireWebhookBasicAuth, async (req, res) => {
+app.post('/v1/tychron/sms', watchTychron, requireWebhookBasicAuth('TYCHRON'), async (req, res) => {
   try {
     const result = await processTychronSmsWebhook(req.body);
     if (!result.ok) {
@@ -1354,7 +1356,7 @@ app.post('/v1/tychron/sms', watchTychron, requireWebhookBasicAuth, async (req, r
   return res.sendStatus(204); // never a body: a body would be sent to the customer
 });
 
-app.post('/v1/tychron/mms', watchTychron, requireWebhookBasicAuth, async (req, res) => {
+app.post('/v1/tychron/mms', watchTychron, requireWebhookBasicAuth('TYCHRON'), async (req, res) => {
   try {
     const result = await processTychronMmsWebhook(req.body);
     if (!result.ok) {

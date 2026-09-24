@@ -98,14 +98,14 @@ test('a same-named environment variable never shadows the row', async () => {
   // rotating a password in PlatformConfig looked applied while the old value
   // stayed in force, with nothing on the host to explain it.
   process.env.CORS_ORIGINS = 'env';
-  process.env.WEBHOOK_BASIC_PASS = 'stale-pin';
+  process.env.TYCHRON_WEBHOOK_BASIC_PASS = 'stale-pin';
   mockStore([
     row('echo-service', 'CORS_ORIGINS', 'row'),
-    row('echo-service', 'WEBHOOK_BASIC_PASS', 'rotated'),
+    row('echo-service', 'TYCHRON_WEBHOOK_BASIC_PASS', 'rotated'),
   ]);
   const values = await refreshSettings();
   assert.equal(values.CORS_ORIGINS, 'row');
-  assert.equal(values.WEBHOOK_BASIC_PASS, 'rotated');
+  assert.equal(values.TYCHRON_WEBHOOK_BASIC_PASS, 'rotated');
 });
 
 test('an unreadable store fails rather than falling back to the environment', async () => {
@@ -127,14 +127,14 @@ test('expired runtime snapshots are unavailable after a failed refresh', async (
   bootstrap();
   let now = 100_000;
   Date.now = () => now;
-  mockStore([row('echo-service', 'WEBHOOK_BASIC_PASS', 'old')]);
+  mockStore([row('echo-service', 'TYCHRON_WEBHOOK_BASIC_PASS', 'old')]);
   await refreshSettings();
   now += CACHE_TTL_MS;
   global.fetch = async () => { throw new Error('offline'); };
   await assert.rejects(ensureFreshSettings(), /offline/);
   assert.throws(settings, /not been read/);
-  mockStore([row('echo-service', 'WEBHOOK_BASIC_PASS', 'new')]);
-  assert.equal((await ensureFreshSettings()).WEBHOOK_BASIC_PASS, 'new');
+  mockStore([row('echo-service', 'TYCHRON_WEBHOOK_BASIC_PASS', 'new')]);
+  assert.equal((await ensureFreshSettings()).TYCHRON_WEBHOOK_BASIC_PASS, 'new');
 });
 
 test('removed legacy mode cannot select IdentityBase', async () => {
