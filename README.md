@@ -56,14 +56,17 @@ so the API cannot be reached from the public side.
 
 The environment's proxy host needs to:
 
-- publish one hostname for this service (for example `webhook.echo.X.TLD`) and
+- publish one hostname for this service (for example `echo-webhook.X.TLD`) and
   forward it to port `8080` — no host port is published;
 - allow request bodies up to `10m`, since MMS payloads arrive inline;
 - leave `TRUSTED_PROXIES` at its loopback default, so `X-Forwarded-For` from the
   proxy is ignored and no public request can be mistaken for a trusted one.
 
-Use [`deploy/nginx/webhook.echo.X.TLD.conf`](deploy/nginx/webhook.echo.X.TLD.conf)
+Use [`deploy/nginx/echo-webhook.X.TLD.conf`](deploy/nginx/echo-webhook.X.TLD.conf)
 as the proxy-host template, substituting the parent domain and certificate paths.
+The hostname follows `<app>-<role>.X.TLD`, matching names such as
+`aida-admin.X.TLD`. Keeping it one label below the parent domain allows a
+`*.X.TLD` certificate to cover it; the proxy still needs a matching host entry.
 EchoWeb calls `http://echo-service-private:8080`, a DNS name registered only
 on the private network by `compose.yaml`. This keeps internal API requests
 inside `trustedCIDR` even when both services also join the proxy network.
@@ -79,10 +82,10 @@ complete HTTPS URLs, all using `POST`:
 
 | Carrier configuration | Webhook URL | Events received |
 | --- | --- | --- |
-| Bandwidth incoming-message callback | `https://webhook.echo.X.TLD/v1/bandwidth/inbound` | Incoming SMS/MMS |
-| Bandwidth outgoing-message callback | `https://webhook.echo.X.TLD/v1/bandwidth/status` | Outbound message status/delivery events |
-| Tychron Switch SMS callback | `https://webhook.echo.X.TLD/v1/tychron/sms` | Incoming SMS and SMS delivery reports |
-| Tychron Switch MMS callback | `https://webhook.echo.X.TLD/v1/tychron/mms` | Incoming MMS and MMS delivery reports |
+| Bandwidth incoming-message callback | `https://echo-webhook.X.TLD/v1/bandwidth/inbound` | Incoming SMS/MMS |
+| Bandwidth outgoing-message callback | `https://echo-webhook.X.TLD/v1/bandwidth/status` | Outbound message status/delivery events |
+| Tychron Switch SMS callback | `https://echo-webhook.X.TLD/v1/tychron/sms` | Incoming SMS and SMS delivery reports |
+| Tychron Switch MMS callback | `https://echo-webhook.X.TLD/v1/tychron/mms` | Incoming MMS and MMS delivery reports |
 
 Configure HTTP Basic authentication on every callback using the effective
 `WEBHOOK_BASIC_USER` and secret `WEBHOOK_BASIC_PASS` settings (`*` < `echo` <
@@ -117,7 +120,7 @@ The private carrier-applications response includes the effective platform
 endpoints so EchoWeb can display them without maintaining a second default.
 
 For every tenant number, configure its Tychron Switch to deliver SMS/MMS and
-status reports to `https://webhook.echo.X.TLD/v1/tychron/{sms,mms}` with
+status reports to `https://echo-webhook.X.TLD/v1/tychron/{sms,mms}` with
 `WEBHOOK_BASIC_USER` and `WEBHOOK_BASIC_PASS` from PlatformConfig. Bandwidth uses
 `/v1/bandwidth/{inbound,status}` on the same hostname. `/v1` is carrier ingress
 only; the private `/api` remains unversioned. The former `/webhooks/*` routes
