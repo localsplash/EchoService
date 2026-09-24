@@ -205,7 +205,7 @@ The port defaults to 3306. Set DB_NAME and this service's own DB_USER explicitly
 The MySQL pool opens on first use; missing coordinates give an actionable error
 while liveness stays available. Once a pool exists, coordinate edits require a
 restart. Store application credentials only; MySQL admin credentials stay with
-the operator's EchoDatabase migration/account jobs. Their application passwords
+the operator's AidaPlatformDB/echo migration/account jobs. Their application passwords
 must match the corresponding PlatformConfig rows.
 
 Ports, media paths and settings-store credentials also require restart. There is no dotenv loader: export variables for `npm start`; Compose
@@ -216,7 +216,7 @@ forwards the variables in its environment block.
 The current Dev environment deliberately discards obsolete settings and local
 authentication/provenance data. There is no legacy mode, preserved SQL settings
 copy or rollback waiting period. Deploy this service and the matching EchoWeb
-revision with service-owned NocoDB credentials, then apply EchoDatabase migration
+revision with service-owned NocoDB credentials, then apply AidaPlatformDB/echo migration
 `013_retire_legacy_configuration_and_auth.sql`.
 
 Verify effective `*`, `echo`, `echo-service` values, database connectivity,
