@@ -1,0 +1,85 @@
+# EchoService as an environment deploys it, for an environment's own Compose
+# file:
+#
+#   include:
+#     - EchoService/compose.yaml
+#
+# Only this service is defined here, with no environment values: the database,
+# NocoDB, network and volume names all come from the environment (see
+# .env.example). For a throwaway local instance use compose.dev.yaml instead.
+#
+# Two networks, because this service has two very different callers:
+#
+#   echo   private, and normally internal (no internet route). EchoWeb, MySQL
+#          and NocoDB live here. Everything except /ping, /healthz and the
+#          carrier webhooks is refused unless the caller is inside the
+#          PlatformConfig `trustedCIDR` row, so this is where EchoWeb calls it.
+#   proxy  added by compose.proxy.yaml, for carrier webhook ingress — see
+#          "Carrier webhook ingress" in README.md. Joining it also gives this
+#          service an internet route, which is what lets it deliver messages
+#          to Bandwidth and Tychron.
+#
+# Enable the overlay per environment, in .env:
+#
+#   COMPOSE_FILE=compose.yaml:compose.proxy.yaml
+
+services:
+  echo-service:
+    build:
+      context: .
+      args:
+        # An environment that `include:`s several repos shares one variable
+        # namespace, so the stamp is per service: ECHO_SERVICE_* wins, and the
+        # unprefixed names remain for a single-repo build (what
+        # docker-container-control exports for the folder it deploys). Set one
+        # of the two, or the image carries no revision and /healthz says so.
+        BUILD_REVISION: ${ECHO_SERVICE_REVISION:-${BUILD_REVISION-}}
+        SOURCE_DATE_EPOCH: ${ECHO_SERVICE_EPOCH:-${SOURCE_DATE_EPOCH-0}}
+        BUILD_DIRTY: ${ECHO_SERVICE_DIRTY:-${BUILD_DIRTY-true}}
+      labels:
+        org.opencontainers.image.revision: ${ECHO_SERVICE_REVISION:-${BUILD_REVISION-}}
+        org.opencontainers.image.source: https://github.com/localsplash/EchoService
+    image: echo-service:${ECHO_SERVICE_TAG:-dev}
+    container_name: ${ECHO_SERVICE_CONTAINER_NAME:-echo-service}
+    environment:
+      TZ: ${TZ:-America/Los_Angeles}
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: "8080"
+      MEDIA_ROOT: /media
+      # Only the settings-store credentials are bootstrap. Database coordinates
+      # and carrier settings come from PlatformConfig.
+      NOCODB_BASE_URL: ${NOCODB_BASE_URL:?the PlatformConfig NocoDB URL}
+      NOCODB_API_TOKEN: ${ECHO_SERVICE_NOCODB_API_TOKEN:?this service NocoDB token}
+      # Deployment network policy, not a setting. With a reverse proxy in
+      # front, leave this at the loopback default so X-Forwarded-For is
+      # ignored and no public request can be taken for a trusted one.
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-127.0.0.1/32}
+    volumes:
+      - media:/media
+      - logs:/var/log/echo
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+    networks:
+      echo:
+        # The service name also resolves on the optional proxy network.
+        # Internal callers must use this name to stay inside trustedCIDR.
+        aliases: [echo-service-private]
+    logging:
+      driver: json-file
+      options:
+        max-size: ${LOG_MAX_SIZE:-10m}
+        max-file: "${LOG_MAX_FILE:-3}"
+    restart: unless-stopped
+
+volumes:
+  media:
+    name: ${ECHO_MEDIA_VOLUME:?the shared media volume, written by EchoService}
+    external: true
+  logs:
+    name: ${ECHO_SERVICE_LOGS_VOLUME:?the log volume, kept across rebuilds}
+    external: true
+
+networks:
+  echo:
+    name: ${ECHO_NETWORK:?the private network EchoWeb, MySQL and NocoDB are on}
+    external: true

@@ -12,3 +12,5 @@ npm-debug.log*
 data/
 logs/
 *.log
+
+src/build-info.json

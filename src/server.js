@@ -1,3 +1,6 @@
+require('./timezone');
+const buildInfo = require('./buildInfo');
+
 // First, before any other module can log a line: capture console output to the
 // ring and the files behind /logs. Nothing is diverted — stdout is unchanged.
 require('./logbook').install();
@@ -17,11 +20,12 @@ const {
   settings,
   refreshSettings,
   ensureFreshSettings,
-  SettingsUnavailableError,
-  IDENTITY_BASE_NAME
+  SettingsUnavailableError
 } = require('./settings');
+const { sourceNames } = require('./nocoSettings');
 const {
   sendTychronMessage,
+  tychronEndpoints,
   extractMmsParts,
   mapSmsStatus,
   mapMmsStatus,
@@ -29,8 +33,6 @@ const {
   tychronStatusDescription
 } = require('./tychron');
 const { clientInTrustedNetwork } = require('./trust');
-const { applyLocalConfig, isBootstrapped, LOCAL_CONFIG_PATH } = require('./localConfig');
-const { mountSetup } = require('./setup');
 const logbook = require('./logbook');
 const webhookWatch = require('./webhookWatch');
 const {
@@ -43,11 +45,6 @@ const {
 } = require('./networkPolicy');
 const { mountLogs } = require('./logsPage');
 
-// Before anything reads NOCODB_*: fold in /data/config.json, without
-// overriding what the environment already states. On a single-host install
-// this file is identity's, mounted read-only, and the wizard never runs.
-applyLocalConfig();
-
 // Multer: store uploads in temp dir, max 3.5 MB per file, max 10 files
 const upload = multer({
   dest: path.join(MEDIA_ROOT, '_tmp'),
@@ -57,121 +54,58 @@ const upload = multer({
 const app = express();
 const port = process.env.PORT || 8080;
 
-/**
- * Configuration comes from echo_tbl_Settings in the Echo database — rows
- * where sApp is '*' (every Echo app) or 'service' (this one). The one value
- * read from outside that database is trustedCIDR, which is platform-wide
- * network policy and lives in the IdentityBase NocoDB base. See
- * EchoDatabase init/009_settings.sql.
- */
-function explicitOrigins() {
-  return (settings().CORS_ORIGINS || '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
-/**
- * The Echo database.
- *
- * Its coordinates come from the environment, because this is where the
- * settings themselves live — a database cannot carry its own address.
- * Everything else about this service is a row in echo_tbl_Settings. No
- * invented defaults: a wrong host that looks configured is worse than one
- * that is plainly missing.
- */
-function poolCoordinates() {
-  const host = (process.env.DB_HOST || '').trim();
-  const user = (process.env.DB_USER || '').trim();
-  const database = (process.env.DB_NAME || '').trim();
-  if (!host || !user || !database) {
-    // A configuration fault, not an application one — so in setup mode, where
-    // this is the ordinary state, the gate answers 503 rather than 500.
-    throw new SettingsUnavailableError(
-      'unconfigured',
-      'DB_HOST, DB_USER and DB_NAME must be set — they say where the Echo database is'
-    );
-  }
-  const parsed = Number.parseInt((process.env.DB_PORT || '').trim(), 10);
-  return {
-    host,
-    // MySQL's own registered port — the protocol's default, not a guess.
-    port: Number.isFinite(parsed) && parsed > 0 ? parsed : 3306,
-    user,
-    password: process.env.DB_PASSWORD || '',
-    database,
-    waitForConnections: true,
-    connectionLimit: 10,
-    timezone: 'Z'
-  };
-}
-/**
- * Built on first use, not at import.
- *
- * Setup mode exists for a host where nothing is configured yet, and building
- * the pool at import made poolCoordinates() throw before main() could ever
- * reach that check — so the fresh host the wizard is for got a stack trace
- * instead of /setup. Nothing queries the database before main() decides, and
- * on the ordinary path refreshSettings() below still forces it at startup, so
- * a missing DB_HOST is reported exactly as promptly as before.
- */
+const { poolCoordinates } = require('./database');
+/** The application pool is validated at startup and reused for data requests. */
 let pool = null;
 function echoDb() {
-  if (!pool) pool = mysql.createPool(poolCoordinates());
+  if (!pool) pool = mysql.createPool(poolCoordinates(settings()));
   return pool;
 }
 
 function isAllowedOrigin(origin) {
   if (!origin) return true;
-  try {
-    const u = new URL(origin);
-    const host = u.hostname.toLowerCase();
-    const isLocal = host === 'localhost' || host === '127.0.0.1';
-    const isWisp = host === 'wisp.net' || host.endsWith('.wisp.net');
-    const isDevUi = host.endsWith('.local') || host.endsWith('.test') || host.endsWith('.internal');
-    if (isLocal) return true;
-    if (isWisp) return true;
-    if (isDevUi) return true;
-    if (explicitOrigins().includes(origin)) return true;
-    return false;
-  } catch {
-    return false;
-  }
+  const config = settings();
+  const origins = (config.CORS_ORIGINS || '').split(',').map((value) => value.trim()).filter(Boolean);
+  const parentDomain = (config.PARENT_DOMAIN || '').trim();
+  if (parentDomain) origins.push(`https://echo.${parentDomain}`);
+  return origins.includes(origin);
 }
 
-function requireWebhookBasicAuth(req, res, next) {
-  // A caller from inside the platform's own network is already trusted —
-  // that is what trustedCIDR names, one value shared by every application.
-  // Bandwidth reaches us from outside it, so basic auth stays the path for
-  // the provider's own webhooks.
-  //
-  // This has to resolve the client through the proxy rather than trusting the
-  // socket peer, and the difference was not academic: behind Nginx Proxy
-  // Manager every request arrives from the proxy's own address on the Docker
-  // network, which falls inside the 172.16.0.0/12 entry of trustedCIDR. The
-  // peer check therefore passed for *every* caller and this basic auth was not
-  // enforced at all — `curl -X POST https://<host>/webhooks/tychron/sms` with
-  // no credentials answered 204 and could write fabricated inbound messages
-  // straight into the database. See trust.js `clientIp`.
-  if (clientInTrustedNetwork(req, settings().trustedCIDR, trustedProxies())) return next();
+function requireWebhookBasicAuth(carrier) {
+  return function authenticateCarrierWebhook(req, res, next) {
+    // A caller from inside the platform's own network is already trusted —
+    // that is what trustedCIDR names, one value shared by every application.
+    // Bandwidth reaches us from outside it, so basic auth stays the path for
+    // the provider's own webhooks.
+    //
+    // This has to resolve the client through the proxy rather than trusting the
+    // socket peer, and the difference was not academic: behind Nginx Proxy
+    // Manager every request arrives from the proxy's own address on the Docker
+    // network, which falls inside the 172.16.0.0/12 entry of trustedCIDR. The
+    // peer check therefore passed for *every* caller and this basic auth was not
+    // enforced at all — `curl -X POST https://<host>/v1/tychron/sms` with
+    // no credentials answered 204 and could write fabricated inbound messages
+    // straight into the database. See trust.js `clientIp`.
+    if (clientInTrustedNetwork(req, settings().trustedCIDR, trustedProxies())) return next();
 
-  const webhookUser = settings().WEBHOOK_BASIC_USER || '';
-  const webhookPass = settings().WEBHOOK_BASIC_PASS || '';
-  if (!webhookUser && !webhookPass) return next();
-  const header = req.headers.authorization || '';
-  if (!header.startsWith('Basic ')) {
-    res.set('WWW-Authenticate', 'Basic realm="EchoService Webhook"');
-    return res.status(401).json({ ok: false, error: 'Missing basic auth' });
-  }
-  const decoded = Buffer.from(header.slice(6), 'base64').toString('utf8');
-  const idx = decoded.indexOf(':');
-  const user = idx >= 0 ? decoded.slice(0, idx) : decoded;
-  const pass = idx >= 0 ? decoded.slice(idx + 1) : '';
-  if (user !== webhookUser || pass !== webhookPass) {
-    res.set('WWW-Authenticate', 'Basic realm="EchoService Webhook"');
-    return res.status(401).json({ ok: false, error: 'Invalid basic auth' });
-  }
-  return next();
+    const webhookUser = settings()[`${carrier}_WEBHOOK_BASIC_USER`] || '';
+    const webhookPass = settings()[`${carrier}_WEBHOOK_BASIC_PASS`] || '';
+    if (!webhookUser && !webhookPass) return next();
+    const header = req.headers.authorization || '';
+    if (!header.startsWith('Basic ')) {
+      res.set('WWW-Authenticate', 'Basic realm="EchoService Webhook"');
+      return res.status(401).json({ ok: false, error: 'Missing basic auth' });
+    }
+    const decoded = Buffer.from(header.slice(6), 'base64').toString('utf8');
+    const idx = decoded.indexOf(':');
+    const user = idx >= 0 ? decoded.slice(0, idx) : decoded;
+    const pass = idx >= 0 ? decoded.slice(idx + 1) : '';
+    if (user !== webhookUser || pass !== webhookPass) {
+      res.set('WWW-Authenticate', 'Basic realm="EchoService Webhook"');
+      return res.status(401).json({ ok: false, error: 'Invalid basic auth' });
+    }
+    return next();
+  };
 }
 
 function normalizeUs10(value) {
@@ -607,14 +541,10 @@ app.use(express.json({ limit: '10mb' }));
 // exactly as before.
 app.use(morgan('combined', { stream: logbook.morganStream }));
 
-// The first-run wizard, before the settings gate below — it is the thing that
-// answers the question that gate is failing on, so it cannot sit behind it.
-mountSetup(app);
-
 // Settings-free, so it answers while the store is down: "the process is up"
 // stays distinguishable from "the process cannot read its settings".
-app.get('/ping', (_req, res) => {
-  res.json({ message: 'pong', service: 'EchoService' });
+app.get(['/ping', '/healthz'], (_req, res) => {
+  res.json({ message: 'pong', service: 'EchoService', ...buildInfo });
 });
 
 // Reading and reloading the network policy, mounted above the gate that policy
@@ -625,22 +555,19 @@ mountPolicy(app);
 /**
  * Routes that answer from outside the trusted network, and why each one must.
  *
- *   - `/webhooks/` — Tychron and Bandwidth call from their own networks. Behind
+ *   - `/v1/` — Tychron and Bandwidth call from their own networks. Behind
  *     the gate the inbound message path would close permanently. They keep
  *     basic auth, and webhookWatch records every call including the refused
  *     ones, so a carrier going quiet stays visible.
  *   - `/ping` — the container HEALTHCHECK, and the one thing that should still
  *     answer when nothing else can. It reveals nothing.
- *   - `/setup`, `/api/setup/` — the first-run wizard, which cannot sit behind a
- *     policy it has not been told where to find. It gates itself to the
- *     deployment network.
  *   - `/api/policy` — the way out of a failed load, gated in the same way.
  *
  * Everything else — the whole `/api` surface and the log viewer — is now
  * refused unless the caller is inside trustedCIDR. Before this, all of it was
  * readable by anyone who knew the hostname.
  */
-const OPEN_TO_ANY_NETWORK = [/^\/webhooks\//, /^\/ping$/, /^\/setup$/, /^\/api\/setup\//, /^\/api\/policy/];
+const OPEN_TO_ANY_NETWORK = [/^\/v1\/(bandwidth|tychron)\//, /^\/ping$/, /^\/api\/policy/];
 
 app.use((req, res, next) => {
   if (OPEN_TO_ANY_NETWORK.some((pattern) => pattern.test(req.path))) return next();
@@ -661,7 +588,7 @@ mountLogs(app, { echoDb, policyState, callerAddress });
  * of unreachable / missing / ambiguous it was.
  */
 app.use((_req, _res, next) => {
-  ensureFreshSettings(echoDb()).then(() => next(), next);
+  ensureFreshSettings().then(() => next(), next);
 });
 
 app.use(cors({
@@ -674,9 +601,9 @@ app.use(cors({
 app.get('/health', async (_req, res) => {
   try {
     await echoDb().query('SELECT 1');
-    res.json({ ok: true, service: 'EchoService', db: true, timestamp: new Date().toISOString() });
+    res.json({ ok: true, service: 'EchoService', ...buildInfo, db: true, timestamp: new Date().toISOString() });
   } catch (error) {
-    res.status(500).json({ ok: false, service: 'EchoService', db: false, error: error.message });
+    res.status(500).json({ ok: false, service: 'EchoService', ...buildInfo, db: false, error: error.message });
   }
 });
 
@@ -909,7 +836,7 @@ app.post('/api/conversations/:customer/send', async (req, res) => {
     // them inline do not share a useful middle.
     if (Number(phoneRecord?.eCarrierId) === CARRIER_TYCHRON) {
       return await sendViaTychron({
-        res, business, customer, text, draftMediaIds, settings: carrierSettings
+        res, business, customer, text, draftMediaIds, settings: { ...carrierSettings, applicationName: phoneRecord.carrierApplicationName }
       });
     }
 
@@ -1026,7 +953,7 @@ app.get('/api/carriers', async (_req, res, next) => {
 app.get('/api/carrier-applications', async (_req, res, next) => {
   try {
     const items = await getCarrierApplications(null);
-    res.json({ items });
+    res.json({ items, tychronEndpoints: tychronEndpoints() });
   } catch (error) {
     next(error);
   }
@@ -1389,14 +1316,14 @@ const watchTychron = webhookWatch.watch('tychron', trustedProxies());
 const watchBandwidth = webhookWatch.watch('bandwidth', trustedProxies());
 
 
-app.post('/webhooks/bandwidth/inbound', watchBandwidth, requireWebhookBasicAuth, async (req, res) => {
+app.post('/v1/bandwidth/inbound', watchBandwidth, requireWebhookBasicAuth('BANDWIDTH'), async (req, res) => {
   if (!Array.isArray(req.body)) {
     return res.status(400).json({ ok: false, error: 'Payload must be an array' });
   }
   return res.json(await processBandwidthEvents(req.body));
 });
 
-app.post('/webhooks/bandwidth/status', watchBandwidth, requireWebhookBasicAuth, async (req, res) => {
+app.post('/v1/bandwidth/status', watchBandwidth, requireWebhookBasicAuth('BANDWIDTH'), async (req, res) => {
   if (!Array.isArray(req.body)) {
     return res.status(400).json({ ok: false, error: 'Payload must be an array' });
   }
@@ -1416,7 +1343,7 @@ app.post('/webhooks/bandwidth/status', watchBandwidth, requireWebhookBasicAuth, 
 //      it is retried forever; and a transient fault must *not* be, so that it
 //      comes back once the fault clears.
 
-app.post('/webhooks/tychron/sms', watchTychron, requireWebhookBasicAuth, async (req, res) => {
+app.post('/v1/tychron/sms', watchTychron, requireWebhookBasicAuth('TYCHRON'), async (req, res) => {
   try {
     const result = await processTychronSmsWebhook(req.body);
     if (!result.ok) {
@@ -1429,7 +1356,7 @@ app.post('/webhooks/tychron/sms', watchTychron, requireWebhookBasicAuth, async (
   return res.sendStatus(204); // never a body: a body would be sent to the customer
 });
 
-app.post('/webhooks/tychron/mms', watchTychron, requireWebhookBasicAuth, async (req, res) => {
+app.post('/v1/tychron/mms', watchTychron, requireWebhookBasicAuth('TYCHRON'), async (req, res) => {
   try {
     const result = await processTychronMmsWebhook(req.body);
     if (!result.ok) {
@@ -1455,38 +1382,13 @@ app.use((err, _req, res, _next) => {
 const RETRY_DELAY_MS = 5000;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/**
- * Find the settings or die.
- *
- * The Bandwidth credentials, the webhook basic-auth pair and the CORS origins
- * are rows in echo_tbl_Settings; the trusted network is the one value read
- * from IdentityBase. There is no fallback: starting without them would mean
- * answering every request with a fault we could not explain. One retry covers
- * the ordinary case of a dependency still coming up beside us; after that,
- * exit saying why.
- */
+/** Configured startup retries once after five seconds, then exits on failure. */
 async function main() {
-  // Nowhere to read trustedCIDR from yet. Exiting here would be the old
-  // behaviour and a dead end — nothing an operator does short of editing the
-  // environment could recover it, and on a fresh host there is nothing to
-  // edit. So come up serving the wizard instead, and let it restart us onto a
-  // real configuration. Everything else stays refused by the settings gate.
-  if (!isBootstrapped()) {
-    console.warn(
-      '[settings] No NOCODB_BASE_URL / NOCODB_API_TOKEN, and no bootstrap file at ' +
-        `${LOCAL_CONFIG_PATH}. Starting in setup mode: open /setup from the ` +
-        'deployment network to say where the settings store is.'
-    );
-    app.listen(port, '0.0.0.0', () => {
-      console.log(`EchoService listening on :${port} (setup mode)`);
-    });
-    return;
-  }
-
+  const { base, table } = sourceNames();
   for (let attempt = 1; ; attempt++) {
     try {
-      await refreshSettings(echoDb());
-      console.log('[settings] echo_tbl_Settings read');
+      await refreshSettings();
+      console.log(`[settings] ${base}/${table} read`);
       break;
     } catch (err) {
       const message = err && err.message ? err.message : String(err);
@@ -1497,9 +1399,8 @@ async function main() {
       }
       console.error(`[settings] ${message}`);
       console.error(
-        '[settings] Cannot start. Check DB_HOST/DB_USER/DB_NAME for the Echo database, ' +
-          'that echo_tbl_Settings exists in it, and NOCODB_BASE_URL/NOCODB_API_TOKEN for ' +
-          `the ${IDENTITY_BASE_NAME} base that carries trustedCIDR.`
+        '[settings] Cannot start. Check DB_HOST/DB_USER/DB_NAME and the service NocoDB credentials. ' +
+          `Selected settings source: ${base}/${table}.`
       );
       process.exit(1);
     }

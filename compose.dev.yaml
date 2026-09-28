@@ -1,0 +1,30 @@
+# Throwaway local instance, on its own:
+#   docker compose -f compose.dev.yaml up -d --build
+# An environment deploys this service with compose.yaml instead, plus
+# compose.proxy.yaml where carriers deliver webhooks to it.
+# Runtime settings and database coordinates come from PlatformConfig.
+services:
+  echo-service:
+    build:
+      context: .
+      args:
+        BUILD_REVISION: ${BUILD_REVISION:?Export Git HEAD before building}
+        SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:?Export Git committer epoch before building}
+        BUILD_DIRTY: ${BUILD_DIRTY:?Export Git dirty state before building}
+    container_name: echo-service
+    environment:
+      TZ: ${TZ:-America/Los_Angeles}
+      PORT: "8080"
+      NOCODB_BASE_URL: ${NOCODB_BASE_URL:?Set the PlatformConfig NocoDB URL}
+      NOCODB_API_TOKEN: ${NOCODB_API_TOKEN:?Set this service NocoDB token}
+    ports:
+      - "127.0.0.1:18080:8080"
+    volumes:
+      - echo_media_data:/media
+      # Preserve operational logs independently from optional bootstrap data.
+      - echo_service_logs:/var/log/echo
+    restart: unless-stopped
+
+volumes:
+  echo_media_data:
+  echo_service_logs:

@@ -10,7 +10,7 @@
  * is a browser policy and a non-browser client ignores it.
  *
  * The rule is `trustedCIDR`, the platform-wide network policy that `identity`
- * owns in `IdentityBase.auth_tbl_Settings` and every application reads. One
+ * owns in `PlatformConfig.cfg_tbl_Setting` (global scope) and every application reads. One
  * value, spelled once, rather than an allow-list per service that drifts.
  *
  * ── Two deliberate exceptions ───────────────────────────────────────────────
@@ -18,7 +18,7 @@
  * **The carrier webhooks stay open.** Tychron and Bandwidth call from their own
  * networks, which are by definition outside `trustedCIDR`. Putting them behind
  * it would close the inbound message path permanently. They keep the control
- * they already had — basic auth, from `echo_tbl_Settings` — and `webhookWatch`
+ * they already had — basic auth, from the selected settings store — and `webhookWatch`
  * records what happens on them so a silent carrier stays visible.
  *
  * **`/ping` stays open.** It is settings-free by design so that "the process is
@@ -40,6 +40,8 @@
  */
 
 const { readTrustedCidr, SettingsUnavailableError } = require('./settings');
+const { sourceNames } = require('./nocoSettings');
+const policySource = () => { const { base, table } = sourceNames(); return `${base}.${table}`; };
 const {
   clientIp,
   clientInTrustedNetwork,
@@ -64,7 +66,7 @@ function trustedProxies() {
  * is unknown.
  *
  * The policy cannot gate the screen that explains why the policy is missing,
- * so this uses the same fixed rule `setup.js` uses for the first-run wizard:
+ * so this uses the fixed deployment bootstrap networks:
  * loopback and the RFC1918 ranges, which is where an operator actually is. It
  * is applied to the *resolved* client address, not the socket peer — behind
  * the proxy every peer is RFC1918 and the check would pass for the whole
@@ -113,7 +115,7 @@ async function loadPolicy() {
         networks: [],
         loadedAt: null,
         error:
-          'IdentityBase.auth_tbl_Settings has no trustedCIDR value. The identity ' +
+          `${policySource()} has no trustedCIDR value. The identity ` +
           'service owns that row — this service reads it and will not invent a ' +
           'network policy of its own.',
       };
@@ -245,13 +247,13 @@ function unavailable(req, res) {
       ? [
           'No network policy has been set',
           'This service decides who may reach it from <code>trustedCIDR</code> in ' +
-            '<code>IdentityBase.auth_tbl_Settings</code>, and that row has no value yet. ' +
+            `<code>${policySource()}</code>, and that row has no value yet. ` +
             'Until it does, it refuses everything except the carrier webhooks.',
         ]
       : [
           'The network policy could not be read',
           'This service decides who may reach it from <code>trustedCIDR</code> in ' +
-            '<code>IdentityBase.auth_tbl_Settings</code>, and NocoDB did not answer. ' +
+            `<code>${policySource()}</code>, and NocoDB did not answer. ` +
             'Until it does, it refuses everything except the carrier webhooks.',
         ];
 
