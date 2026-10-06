@@ -24,7 +24,18 @@
 #   COMPOSE_FILE=compose.yaml:compose.proxy.yaml
 
 services:
+  echo-media-init:
+    image: alpine:3.20
+    user: "0:0"
+    command: ["chown", "-R", "100:101", "/media"]
+    volumes:
+      - media:/media
+    restart: "no"
+
   echo-service:
+    depends_on:
+      echo-media-init:
+        condition: service_completed_successfully
     build:
       context: .
       args:
