@@ -77,8 +77,11 @@ return 404 at the edge. Register the four URLs with their respective carriers.
 
 ### Carrier cutover URLs
 
-Replace `X.TLD` with this environment's `PARENT_DOMAIN`. Give the carriers these
-complete HTTPS URLs, all using `POST`:
+Replace `X.TLD` with this environment's `PARENT_DOMAIN`, or open Echo's
+Settings → Carrier Applications and edit a Bandwidth or Tychron application:
+the form lists these URLs already filled in for the environment (EchoService
+returns them as `webhookUrls` from `GET /api/carrier-applications`). Give the
+carriers these complete HTTPS URLs, all using `POST`:
 
 | Carrier configuration | Webhook URL | Events received |
 | --- | --- | --- |

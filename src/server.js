@@ -32,6 +32,7 @@ const {
   parseTychronErrorCode,
   tychronStatusDescription
 } = require('./tychron');
+const { carrierWebhookUrls } = require('./carrierWebhooks');
 const { clientInTrustedNetwork } = require('./trust');
 const logbook = require('./logbook');
 const webhookWatch = require('./webhookWatch');
@@ -953,7 +954,7 @@ app.get('/api/carriers', async (_req, res, next) => {
 app.get('/api/carrier-applications', async (_req, res, next) => {
   try {
     const items = await getCarrierApplications(null);
-    res.json({ items, tychronEndpoints: tychronEndpoints() });
+    res.json({ items, tychronEndpoints: tychronEndpoints(), webhookUrls: carrierWebhookUrls() });
   } catch (error) {
     next(error);
   }
