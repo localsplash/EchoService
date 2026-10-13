@@ -3,6 +3,19 @@
 const { settings } = require('./settings');
 
 /**
+ * PARENT_DOMAIN is meant to be a bare domain, but a value pasted as a URL
+ * (`https://example.com/`) or with a port names the same domain, so read it
+ * as that rather than reporting the setting as missing.
+ */
+function parentDomain(value) {
+  return String(value || '').trim().toLowerCase()
+    .replace(/^[a-z][a-z0-9+.-]*:\/\//, '')
+    .replace(/[/?#].*$/, '')
+    .replace(/:\d+$/, '')
+    .replace(/^\.+|\.+$/g, '');
+}
+
+/**
  * The callback URLs operators register with each carrier.
  *
  * Built from PARENT_DOMAIN on the published `echo-webhook.<PARENT_DOMAIN>`
@@ -12,7 +25,7 @@ const { settings } = require('./settings');
  * domain is unset or not a hostname, rather than a URL that cannot work.
  */
 function carrierWebhookUrls(platform = settings()) {
-  const domain = String(platform?.PARENT_DOMAIN || '').trim().toLowerCase().replace(/^\.+|\.+$/g, '');
+  const domain = parentDomain(platform?.PARENT_DOMAIN);
   if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(domain)) return null;
   const baseUrl = `https://echo-webhook.${domain}`;
   return {

@@ -14,9 +14,16 @@ test('carrier webhook URLs derive from PARENT_DOMAIN', () => {
   assert.equal(urls.tychron.basicAuth.password, 'TYCHRON_WEBHOOK_BASIC_PASS');
 });
 
+test('carrier webhook URLs accept PARENT_DOMAIN written as a URL', () => {
+  for (const value of ['https://example.test/', 'example.test.', 'example.test:443', 'HTTPS://Example.Test/path']) {
+    assert.equal(carrierWebhookUrls({ PARENT_DOMAIN: value }).baseUrl, 'https://echo-webhook.example.test', value);
+  }
+});
+
 test('carrier webhook URLs are absent without a usable domain', () => {
   assert.equal(carrierWebhookUrls({}), null);
   assert.equal(carrierWebhookUrls({ PARENT_DOMAIN: '' }), null);
   assert.equal(carrierWebhookUrls({ PARENT_DOMAIN: 'localhost' }), null);
-  assert.equal(carrierWebhookUrls({ PARENT_DOMAIN: 'evil.test/path' }), null);
+  assert.equal(carrierWebhookUrls({ PARENT_DOMAIN: 'bad domain.test' }), null);
+  assert.equal(carrierWebhookUrls({ PARENT_DOMAIN: 'user@evil.test' }), null);
 });
